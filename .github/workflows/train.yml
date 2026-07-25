@@ -7,7 +7,8 @@ on:
       - "src/models/**"
       - "src/features/**"
       - "src/training/**"
-      - "configs/**"
+      - "configs/model.yaml"
+      - "configs/training.yaml"
   workflow_dispatch:
 
 jobs:
