@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install poetry
+          poetry install
+
+      - name: Lint with ruff
+        run: poetry run ruff check src/ tests/
+
+      - name: Security scan with bandit
+        run: poetry run bandit -r src/ -ll -q
+
+      - name: Run unit tests with coverage
+        run: |
+          poetry run pytest tests/unit/ tests/validation/ -v \
+            --cov=src --cov-report=term-missing --cov-fail-under=70
+
+      - name: Run integration tests
+        run: poetry run pytest tests/integration/ -v
+
+      - name: Check for secrets in diff
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: ${{ github.event.repository.default_branch }}
+          head: HEAD

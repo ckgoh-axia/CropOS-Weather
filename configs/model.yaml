@@ -1,0 +1,5 @@
+gnn:
+  hidden_channels: 128
+  num_layers: 2
+  dropout: 0.1
+  edge_radius_km: 200

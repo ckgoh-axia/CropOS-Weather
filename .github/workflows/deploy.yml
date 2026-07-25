@@ -1,0 +1,36 @@
+name: Deploy Inference API
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_version:
+        description: "Checkpoint version tag (leave blank for latest)"
+        required: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download model checkpoint from HuggingFace Hub
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          pip install huggingface-hub -q
+          mkdir -p checkpoints
+          python -c "
+          from huggingface_hub import hf_hub_download
+          hf_hub_download(
+              repo_id='cropos/cropos-gnn',
+              filename='best_model.pt',
+              local_dir='checkpoints/',
+              token='${{ secrets.HF_TOKEN }}'
+          )"
+
+      - name: Deploy to Railway
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          npm install -g @railway/cli -q
+          railway up --service cropos-api

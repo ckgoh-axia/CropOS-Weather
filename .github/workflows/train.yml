@@ -1,0 +1,46 @@
+name: Trigger Training Run
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/models/**"
+      - "src/features/**"
+      - "src/training/**"
+      - "configs/**"
+  workflow_dispatch:
+
+jobs:
+  trigger-runpod:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trigger RunPod training pod
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+        run: |
+          pip install runpod -q
+          python - <<'PYEOF'
+          import runpod, os
+          runpod.api_key = os.environ["RUNPOD_API_KEY"]
+          pod = runpod.create_pod(
+              name="cropos-training",
+              image_name="runpod/pytorch:2.2.0-py3.11-cuda12.1-devel",
+              gpu_type_id="NVIDIA GeForce RTX 4090",
+              cloud_type="COMMUNITY",
+              docker_args=(
+                  "bash -c 'curl -sL https://raw.githubusercontent.com/ckgoh-axia/CropOS-Weather/main/"
+                  "scripts/train_runpod.sh | bash'"
+              ),
+              env={
+                  "HF_TOKEN": os.environ["HF_TOKEN"],
+                  "MLFLOW_TRACKING_URI": os.environ.get("MLFLOW_TRACKING_URI", ""),
+              },
+              volume_in_gb=50,
+              container_disk_in_gb=20,
+          )
+          print(f"RunPod pod launched: {pod['id']}")
+          PYEOF

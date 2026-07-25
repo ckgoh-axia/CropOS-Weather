@@ -1,0 +1,40 @@
+thailand:
+  lat_min: 5.5
+  lat_max: 20.5
+  lon_min: 97.5
+  lon_max: 105.7
+
+metar_stations:
+  - VTUU  # Ubon Ratchathani
+  - VTUD  # Udon Thani
+  - VTUK  # Khon Kaen
+  - VTUB  # Buriram
+  - VTUN  # Nakhon Ratchasima
+  - VTUL  # Loei
+  - VTCC  # Chiang Mai
+  - VTCP  # Phitsanulok
+  - VTCN  # Nan
+  - VTBS  # Suvarnabhumi
+  - VTBD  # Don Mueang
+  - VTBP  # Prachin Buri
+  - VTSS  # Hat Yai
+  - VTSP  # Phuket
+  - VTSH  # Surat Thani
+  - VTSG  # Krabi
+
+era5_variables:
+  - temperature_2m
+  - dewpoint_2m
+  - relativehumidity_2m
+  - precipitation
+  - windspeed_10m
+  - winddirection_10m
+  - surface_pressure
+
+imerg_product: IMERG-FR
+training_start: "2015-01-01"
+training_end: "2022-12-31"
+validation_start: "2023-01-01"
+validation_end: "2023-12-31"
+washoff_threshold_mm: 5.0
+forecast_horizons: [12, 24, 36, 48]

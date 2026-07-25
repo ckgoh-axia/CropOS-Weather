@@ -1,0 +1,10 @@
+data/
+.cache/
+checkpoints/
+*.pyc
+__pycache__/
+.env
+*.pt
+mlruns/
+.dvc/tmp/
+.dvc/cache/

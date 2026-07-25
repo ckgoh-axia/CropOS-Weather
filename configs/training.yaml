@@ -1,0 +1,9 @@
+batch_size: 32
+learning_rate: 1.0e-4
+weight_decay: 1.0e-5
+epochs: 100
+early_stopping_patience: 10
+gradient_clip: 1.0
+loss:
+  brier_weight: 0.7
+  csi_weight: 0.3

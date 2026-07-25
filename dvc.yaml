@@ -1,0 +1,13 @@
+stages:
+  ingest:
+    cmd: python scripts/download_data.py --config configs/data.yaml --output-dir data/raw
+    deps:
+      - scripts/download_data.py
+      - configs/data.yaml
+      - src/ingestion/metar.py
+      - src/ingestion/era5.py
+      - src/ingestion/imerg.py
+    outs:
+      - data/raw/metar_thai.parquet
+      - data/raw/era5_thailand.parquet
+      - data/raw/imerg/
