@@ -53,6 +53,7 @@ def download_metar(cfg: dict, start: str, end: str, outdir: Path) -> Path:
 
 
 def download_nwp(cfg: dict, start: str, end: str, outdir: Path) -> Path:
+    import time
     import pandas as pd
     from src.ingestion.metar import STATION_COORDS
     from src.ingestion.nwp_baseline import fetch_nwp_at_point
@@ -65,8 +66,10 @@ def download_nwp(cfg: dict, start: str, end: str, outdir: Path) -> Path:
             df["station"] = station
             frames.append(df)
             logger.info(f"NWP | {station} done")
+            time.sleep(5)  # stay under Open-Meteo free tier rate limit
         except Exception as exc:
             logger.warning(f"NWP | {station} failed: {exc}")
+            time.sleep(10)  # back off longer on failure
 
     nwp_df = pd.concat(frames, ignore_index=True)
     path = outdir / "nwp_baseline.parquet"
