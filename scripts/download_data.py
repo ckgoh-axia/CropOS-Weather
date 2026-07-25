@@ -58,11 +58,17 @@ def download_nwp(cfg: dict, start: str, end: str, outdir: Path) -> Path:
     from src.ingestion.metar import STATION_COORDS
     from src.ingestion.nwp_baseline import fetch_nwp_at_point
 
+    # Open-Meteo historical forecast API only available from 2016-01-01
+    NWP_MIN_START = "2016-01-01"
+    effective_start = start if start >= NWP_MIN_START else NWP_MIN_START
+    if effective_start != start:
+        logger.info(f"NWP | clamping start {start} → {effective_start} (API limit)")
+
     logger.info("NWP | starting download (GFS via Open-Meteo, 16 stations)...")
     frames = []
     for station, (lat, lon) in STATION_COORDS.items():
         try:
-            df = fetch_nwp_at_point(lat, lon, start, end)
+            df = fetch_nwp_at_point(lat, lon, effective_start, end)
             df["station"] = station
             frames.append(df)
             logger.info(f"NWP | {station} done")
@@ -71,11 +77,15 @@ def download_nwp(cfg: dict, start: str, end: str, outdir: Path) -> Path:
             logger.warning(f"NWP | {station} failed: {exc}")
             time.sleep(10)  # back off longer on failure
 
-    nwp_df = pd.concat(frames, ignore_index=True)
-    path = outdir / "nwp_baseline.parquet"
-    nwp_df.to_parquet(path, index=False)
-    logger.info(f"NWP | {len(nwp_df):,} rows → {path}")
-    return path
+    out_path = outdir / "nwp_baseline.parquet"
+    if not frames:
+        logger.warning("NWP | all stations failed — saving empty baseline file")
+        pd.DataFrame(columns=["station", "timestamp", "nwp_precip_mm"]).to_parquet(out_path, index=False)
+    else:
+        nwp_df = pd.concat(frames, ignore_index=True)
+        nwp_df.to_parquet(out_path, index=False)
+        logger.info(f"NWP | {len(nwp_df):,} rows → {out_path}")
+    return out_path
 
 
 # ---------------------------------------------------------------------------
