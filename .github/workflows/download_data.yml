@@ -24,10 +24,12 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install Poetry + dependencies
+      - name: Install data dependencies (no torch needed)
         run: |
-          pip install poetry
-          poetry install --no-root
+          pip install \
+            openmeteo-requests requests-cache retry-requests \
+            pandas numpy pyyaml tqdm \
+            huggingface-hub
 
       - name: Download ERA5, METAR, NWP in parallel → push to HF Datasets
         env:
