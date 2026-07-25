@@ -1,5 +1,6 @@
 [tool.poetry]
 name = "cropos"
+package-mode = false
 version = "0.1.0"
 description = "Hyper-local precipitation forecast for Thai smallholder farms"
 authors = ["CropOS Team"]
