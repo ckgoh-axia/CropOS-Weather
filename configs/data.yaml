@@ -31,7 +31,8 @@ era5_variables:
   - winddirection_10m
   - surface_pressure
 
-imerg_product: IMERG-FR
+precipitation_label_source: era5  # ERA5 precipitation field; no NASA account required
+precipitation_label_threshold_mm: 1.0  # rain event if ERA5 precip >= 1mm in window
 training_start: "2015-01-01"
 training_end: "2022-12-31"
 validation_start: "2023-01-01"

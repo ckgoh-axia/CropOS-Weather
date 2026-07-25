@@ -1,0 +1,38 @@
+name: Download Training Data
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: "Start date (YYYY-MM-DD)"
+        required: false
+        default: "2015-01-01"
+      end_date:
+        description: "End date (YYYY-MM-DD)"
+        required: false
+        default: "2022-12-31"
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry + dependencies
+        run: |
+          pip install poetry
+          poetry install --no-root
+
+      - name: Download ERA5, METAR, NWP in parallel → push to HF Datasets
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          poetry run python scripts/download_data.py \
+            --start "${{ github.event.inputs.start_date }}" \
+            --end "${{ github.event.inputs.end_date }}"
