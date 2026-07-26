@@ -29,11 +29,11 @@ def train(config_dir: str = "configs") -> None:
 
     model = CropOSGNN(
         era5_in=len(dcfg["era5_variables"]),
-        metar_in=5,
         hidden=mcfg["gnn"]["hidden_channels"],
         n_horizons=len(dcfg["forecast_horizons"]),
         num_layers=mcfg["gnn"]["num_layers"],
         dropout=mcfg["gnn"]["dropout"],
+        local_station_dropout=mcfg["gnn"].get("local_station_dropout", 0.4),
     ).to(device)
 
     torch.optim.AdamW(

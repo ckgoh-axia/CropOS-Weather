@@ -23,7 +23,7 @@ _model: CropOSGNN | None = None
 def _get_model() -> CropOSGNN:
     global _model
     if _model is None:
-        m = CropOSGNN(era5_in=7, metar_in=5, hidden=128, n_horizons=len(HORIZONS))
+        m = CropOSGNN(era5_in=7, hidden=128, n_horizons=len(HORIZONS))
         if os.path.exists(MODEL_PATH):
             m.load_state_dict(torch.load(MODEL_PATH, map_location="cpu", weights_only=True))
             logger.info(f"Model loaded from {MODEL_PATH}")
