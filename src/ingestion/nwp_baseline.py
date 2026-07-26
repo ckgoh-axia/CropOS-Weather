@@ -1,10 +1,12 @@
 """Open-Meteo historical forecast ingestion — GFS NWP baseline."""
 from __future__ import annotations
+
+import logging
+
 import openmeteo_requests
+import pandas as pd
 import requests_cache
 from retry_requests import retry
-import pandas as pd
-import logging
 
 logger = logging.getLogger(__name__)
 

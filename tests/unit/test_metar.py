@@ -1,8 +1,8 @@
 # tests/unit/test_metar.py
-import pandas as pd
-import pytest
-import respx
 import httpx
+import pandas as pd
+import respx
+
 from src.ingestion.metar import fetch_metar_station, parse_metar_response
 
 SAMPLE_CSV = """station,valid,tmpf,dwpf,relh,drct,sknt,p01i,alti,mslp,vsby,skyc1,wxcodes
@@ -20,8 +20,8 @@ def test_parse_metar_returns_dataframe():
 
 def test_parse_metar_detects_rain_code():
     df = parse_metar_response(SAMPLE_CSV)
-    assert df.iloc[1]["rain_event"] == True
-    assert df.iloc[0]["rain_event"] == False
+    assert df.iloc[1]["rain_event"]
+    assert not df.iloc[0]["rain_event"]
 
 def test_parse_metar_converts_inches_to_mm():
     df = parse_metar_response(SAMPLE_CSV)

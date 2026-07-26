@@ -1,6 +1,7 @@
 """Tests for temporal alignment and ERA5-METAR merging."""
 import pandas as pd
 import pytest
+
 from src.preprocessing.align import align_to_hourly_utc, merge_era5_metar
 from src.preprocessing.qc import flag_metar_outliers
 

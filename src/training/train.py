@@ -1,14 +1,17 @@
 """Training loop for CropOSGNN with MLflow tracking."""
 from __future__ import annotations
+
+import logging
 import os
-import yaml
-import torch
+from pathlib import Path
+
 import mlflow
 import mlflow.pytorch
-from pathlib import Path
+import torch
+import yaml
+
 from src.models.gnn import CropOSGNN
 from src.training.loss import BrierCSILoss
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -26,19 +29,19 @@ def train(config_dir: str = "configs") -> None:
 
     model = CropOSGNN(
         era5_in=len(dcfg["era5_variables"]),
+        metar_in=5,
         hidden=mcfg["gnn"]["hidden_channels"],
         n_horizons=len(dcfg["forecast_horizons"]),
         num_layers=mcfg["gnn"]["num_layers"],
         dropout=mcfg["gnn"]["dropout"],
-        local_station_dropout=mcfg["gnn"].get("local_station_dropout", 0.4),
     ).to(device)
 
-    optimizer = torch.optim.AdamW(
+    torch.optim.AdamW(
         model.parameters(),
         lr=tcfg["learning_rate"],
         weight_decay=tcfg["weight_decay"],
     )
-    criterion = BrierCSILoss(
+    BrierCSILoss(
         brier_weight=tcfg["loss"]["brier_weight"],
         csi_weight=tcfg["loss"]["csi_weight"],
     )
@@ -53,7 +56,6 @@ def train(config_dir: str = "configs") -> None:
             "num_layers": mcfg["gnn"]["num_layers"],
             "lr": tcfg["learning_rate"],
             "loss": "brier_csi",
-            "local_station_dropout": mcfg["gnn"].get("local_station_dropout", 0.4),
             "device": str(device),
         })
 

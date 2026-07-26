@@ -1,10 +1,12 @@
 """GPM IMERG ingestion via gpm-api."""
 from __future__ import annotations
-import xarray as xr
-import numpy as np
+
 import logging
 import os
-from typing import List, Dict
+from typing import Dict, List
+
+import numpy as np
+import xarray as xr
 
 logger = logging.getLogger(__name__)
 
@@ -48,9 +50,12 @@ def extract_imerg_at_points(
     lat_points: List[float],
     lon_points: List[float],
 ) -> np.ndarray:
-    """Extract IMERG precipitation at (lat, lon) points via nearest-neighbor. Returns (time, n_points)."""
+    """Extract IMERG precipitation at (lat, lon) points via nearest-neighbor.
+
+    Returns array of shape (time, n_points).
+    """
     results = [
         ds["precipitation"].sel(lat=lat, lon=lon, method="nearest").values
-        for lat, lon in zip(lat_points, lon_points)
+        for lat, lon in zip(lat_points, lon_points, strict=False)
     ]
     return np.stack(results, axis=-1)

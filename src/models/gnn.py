@@ -1,5 +1,6 @@
 """CropOSGNN — heterogeneous GNN for Thai farm-level precipitation forecasting."""
 from __future__ import annotations
+
 import torch
 import torch.nn as nn
 from torch_geometric.data import HeteroData

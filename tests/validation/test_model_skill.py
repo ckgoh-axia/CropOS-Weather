@@ -1,6 +1,10 @@
 import numpy as np
+
 from src.training.evaluate import (
-    brier_score, critical_success_index, false_negative_rate, compute_skill_report,
+    brier_score,
+    compute_skill_report,
+    critical_success_index,
+    false_negative_rate,
 )
 
 

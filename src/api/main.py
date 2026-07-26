@@ -1,11 +1,14 @@
 """CropOS FastAPI inference service."""
 from __future__ import annotations
+
+import logging
 import os
+
 import torch
 from fastapi import FastAPI
-from src.api.schemas import PredictRequest, PredictResponse, HorizonForecast
+
+from src.api.schemas import HorizonForecast, PredictRequest, PredictResponse
 from src.models.gnn import CropOSGNN
-import logging
 
 logger = logging.getLogger(__name__)
 app = FastAPI(title="CropOS Precipitation Forecast API", version="0.1.0")

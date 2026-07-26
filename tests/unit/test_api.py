@@ -1,6 +1,8 @@
+from unittest.mock import patch
+
 import torch
 from fastapi.testclient import TestClient
-from unittest.mock import patch
+
 from src.api.main import app
 
 client = TestClient(app)

@@ -10,9 +10,10 @@ This module merges the two sources into a single DataFrame keyed by
 (lat, lon, timestamp) that the DataLoader can join to farm target nodes.
 """
 from __future__ import annotations
-import pandas as pd
-import numpy as np
+
 import logging
+
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,7 @@ def build_labels(
 
     # METAR labels take priority: drop ERA5 rows at station locations/times
     metar_keys = set(zip(metar_labels["lat"].round(4), metar_labels["lon"].round(4),
-                         metar_labels["timestamp"].astype(str)))
+                         metar_labels["timestamp"].astype(str), strict=False))
     era5_mask = era5_labels.apply(
         lambda r: (round(r["lat"], 4), round(r["lon"], 4), str(r["timestamp"])) not in metar_keys,
         axis=1,
@@ -91,7 +92,9 @@ def _extract_era5_labels(era5_df: pd.DataFrame) -> pd.DataFrame:
     elif "precipitation" in df.columns:
         precip_col = "precipitation"
     else:
-        raise ValueError(f"No precipitation column found in ERA5 df. Columns: {df.columns.tolist()}")
+        raise ValueError(
+            f"No precipitation column found in ERA5 df. Columns: {df.columns.tolist()}"
+        )
 
     df["precip_mm"] = pd.to_numeric(df[precip_col], errors="coerce").fillna(0.0)
 

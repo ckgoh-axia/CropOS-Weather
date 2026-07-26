@@ -1,6 +1,9 @@
+from unittest.mock import patch
+
 import pandas as pd
-from unittest.mock import patch, MagicMock
-from src.ingestion.era5 import fetch_era5_grid, build_thailand_grid, ERA5_VARIABLES
+
+from src.ingestion.era5 import ERA5_VARIABLES, build_thailand_grid, fetch_era5_grid
+
 
 def test_era5_variables_has_required_fields():
     assert "precipitation" in ERA5_VARIABLES

@@ -10,13 +10,14 @@ All three sources download in parallel. On completion, parquet files are
 pushed to a private HuggingFace Dataset repo (auto-created if absent).
 """
 from __future__ import annotations
+
 import argparse
 import logging
 import os
-import yaml
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+import yaml
 from huggingface_hub import HfApi, create_repo
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -30,7 +31,7 @@ HF_DATASET_REPO_NAME = "cropos-data"
 # ---------------------------------------------------------------------------
 
 def download_era5(cfg: dict, start: str, end: str, outdir: Path) -> Path:
-    from src.ingestion.era5 import fetch_era5_grid, build_thailand_grid
+    from src.ingestion.era5 import build_thailand_grid, fetch_era5_grid
 
     logger.info("ERA5 | starting download (0.25° grid over Thailand)...")
     lat_pts, lon_pts = build_thailand_grid(spacing_deg=0.25)
@@ -55,7 +56,9 @@ def download_metar(cfg: dict, start: str, end: str, outdir: Path) -> Path:
 
 def download_nwp(cfg: dict, start: str, end: str, outdir: Path) -> Path:
     import time
+
     import pandas as pd
+
     from src.ingestion.metar import STATION_COORDS
     from src.ingestion.nwp_baseline import fetch_nwp_at_point
 
@@ -81,7 +84,9 @@ def download_nwp(cfg: dict, start: str, end: str, outdir: Path) -> Path:
     out_path = outdir / "nwp_baseline.parquet"
     if not frames:
         logger.warning("NWP | all stations failed — saving empty baseline file")
-        pd.DataFrame(columns=["station", "timestamp", "nwp_precip_mm"]).to_parquet(out_path, index=False)
+        pd.DataFrame(columns=["station", "timestamp", "nwp_precip_mm"]).to_parquet(
+            out_path, index=False
+        )
     else:
         nwp_df = pd.concat(frames, ignore_index=True)
         nwp_df.to_parquet(out_path, index=False)
@@ -115,12 +120,16 @@ def main() -> None:
     parser.add_argument("--output-dir", default="data/raw")
     parser.add_argument("--start", default=None, help="Override training_start in config")
     parser.add_argument("--end", default=None, help="Override training_end in config")
-    parser.add_argument("--skip-push", action="store_true", help="Skip HuggingFace upload (local run)")
+    parser.add_argument(
+        "--skip-push", action="store_true", help="Skip HuggingFace upload (local run)"
+    )
     args = parser.parse_args()
 
     token = os.environ.get("HF_TOKEN")
     if not token and not args.skip_push:
-        raise ValueError("Set HF_TOKEN environment variable (or pass --skip-push for a local-only run)")
+        raise ValueError(
+            "Set HF_TOKEN environment variable (or pass --skip-push for a local-only run)"
+        )
 
     with open(args.config) as f:
         cfg = yaml.safe_load(f)

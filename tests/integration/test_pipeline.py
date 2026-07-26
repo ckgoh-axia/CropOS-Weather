@@ -4,18 +4,17 @@ End-to-end pipeline smoke test.
 Runs without real data: uses in-memory stubs to verify all components wire together.
 Takes ~10 seconds on CPU, no GPU needed.
 """
-import torch
-import pandas as pd
-import numpy as np
-import pytest
 from unittest.mock import patch
-from src.ingestion.metar import parse_metar_response
-from src.preprocessing.align import align_to_hourly_utc
-from src.preprocessing.qc import flag_metar_outliers
+
+import numpy as np
+import torch
+
 from src.features.graph_builder import build_heterogeneous_graph
+from src.ingestion.metar import parse_metar_response
 from src.models.gnn import CropOSGNN
-from src.training.loss import BrierCSILoss
+from src.preprocessing.qc import flag_metar_outliers
 from src.training.evaluate import compute_skill_report
+from src.training.loss import BrierCSILoss
 
 SAMPLE_METAR = """station,valid,tmpf,dwpf,relh,drct,sknt,p01i,alti,mslp,vsby,skyc1,wxcodes
 VTUU,2023-06-01 00:00,82.4,75.2,80,180,10,0.00,29.85,1010.0,6.00,FEW,
@@ -68,6 +67,7 @@ def test_full_pipeline_metar_to_graph_to_gnn():
 def test_api_predict_endpoint_returns_valid_response():
     """API returns well-formed PredictResponse for a Thai farm coordinate."""
     from fastapi.testclient import TestClient
+
     from src.api.main import app
     client = TestClient(app)
     with patch("src.api.main.run_inference", return_value=torch.tensor([[0.3, 0.7, 0.8, 0.6]])):
@@ -81,4 +81,4 @@ def test_api_predict_endpoint_returns_valid_response():
     assert data["farm_id"] == "integration_farm_001"
     assert len(data["forecast"]) == 4
     assert data["forecast"][1]["horizon_hours"] == 24
-    assert data["forecast"][1]["alert"] == True  # 0.7 >= 0.5 threshold
+    assert data["forecast"][1]["alert"]  # 0.7 >= 0.5 threshold

@@ -1,7 +1,7 @@
 """Align all data sources to hourly UTC."""
 from __future__ import annotations
+
 import pandas as pd
-from typing import Optional
 
 
 def align_to_hourly_utc(

@@ -1,7 +1,9 @@
 """Forecast skill metrics — Brier, CSI, FNR, Brier Skill Score."""
 from __future__ import annotations
-import numpy as np
+
 from typing import Dict
+
+import numpy as np
 
 
 def brier_score(predicted: np.ndarray, observed: np.ndarray) -> float:

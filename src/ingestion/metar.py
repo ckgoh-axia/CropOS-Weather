@@ -1,20 +1,22 @@
 """METAR ingestion from Iowa State University ASOS network."""
 from __future__ import annotations
-import httpx
-import pandas as pd
+
 import logging
 import time
 from typing import List
+
+import httpx
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
 IOWA_STATE_URL = "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py"
 
-# Timeout per yearly chunk request. Iowa State ASOS returns ~8,760 rows per
-# station-year as CSV (~500 KB); 300s is generous even on slow connections.
+# Timeout per yearly chunk. Iowa State returns ~8,760 rows/station-year (~500KB);
+# 300s is generous even on slow GitHub Actions runners.
 REQUEST_TIMEOUT_S = 300.0
 
-# Delay between station requests to avoid hammering Iowa State
+# Delay between stations to be polite to Iowa State ASOS
 STATION_DELAY_S = 2.0
 
 THAI_METAR_STATIONS: List[str] = [
@@ -23,7 +25,6 @@ THAI_METAR_STATIONS: List[str] = [
     "VTSS", "VTSP", "VTSH", "VTSG",
 ]
 
-# Official coordinates for each Thai METAR station (lat, lon)
 STATION_COORDS: dict[str, tuple[float, float]] = {
     "VTUU": (15.25, 104.87), "VTUD": (17.39, 102.79),
     "VTUK": (16.47, 102.78), "VTUB": (15.23, 103.25),
@@ -65,8 +66,8 @@ def fetch_metar_station(
 ) -> pd.DataFrame:
     """Fetch METAR for one station across the full date range.
 
-    Splits the request into one HTTP call per calendar year so each
-    individual request stays small (~500 KB) and never times out.
+    Splits into one HTTP call per calendar year so each request stays
+    small (~500 KB) and never hits a timeout.
     """
     start_year = int(start_date[:4])
     end_year = int(end_date[:4])
@@ -85,7 +86,6 @@ def fetch_metar_station(
                 logger.warning(f"METAR | {station} {year} failed: {exc}")
 
     if not yearly_frames:
-        # Return empty DataFrame with the correct schema so concat doesn't crash
         return pd.DataFrame(columns=[
             "station", "timestamp", "precip_mm", "rain_event",
             "tmpf", "dwpf", "relh", "drct", "sknt", "alti", "vsby",
@@ -98,7 +98,6 @@ def parse_metar_response(csv_text: str) -> pd.DataFrame:
     from io import StringIO
     lines = [ln for ln in csv_text.splitlines() if not ln.startswith("#") and ln.strip()]
     if len(lines) <= 1:
-        # Only header line (or empty) — no data for this station/period
         return pd.DataFrame()
     df = pd.read_csv(StringIO("\n".join(lines)), low_memory=False)
     if df.empty:
@@ -137,5 +136,8 @@ def fetch_all_thai_stations(start_date: str, end_date: str) -> pd.DataFrame:
             "tmpf", "dwpf", "relh", "drct", "sknt", "alti", "vsby", "lat", "lon",
         ])
     result = pd.concat(frames, ignore_index=True)
-    logger.info(f"METAR | total: {len(result):,} rows across {result['station'].nunique()} stations")
+    logger.info(
+        f"METAR | total: {len(result):,} rows across "
+        f"{result['station'].nunique()} stations"
+    )
     return result

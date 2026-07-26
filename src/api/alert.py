@@ -1,8 +1,11 @@
 """Alert delivery — threshold check + LINE/SMS notification stub."""
 from __future__ import annotations
-import os
-import httpx
+
 import logging
+import os
+
+import httpx
+
 from src.api.schemas import PredictResponse
 
 logger = logging.getLogger(__name__)

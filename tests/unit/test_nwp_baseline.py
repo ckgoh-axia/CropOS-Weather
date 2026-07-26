@@ -1,6 +1,9 @@
-import pandas as pd
 from unittest.mock import patch
+
+import pandas as pd
+
 from src.ingestion.nwp_baseline import fetch_nwp_at_point
+
 
 def test_fetch_nwp_returns_forecast_dataframe():
     mock_df = pd.DataFrame({

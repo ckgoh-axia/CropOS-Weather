@@ -1,14 +1,16 @@
 """ERA5-Land ingestion via Open-Meteo archive API."""
 from __future__ import annotations
-import time
-import openmeteo_requests
-import requests_cache
-from retry_requests import retry
-import pandas as pd
-import numpy as np
+
 import logging
+import time
 from pathlib import Path
 from typing import List
+
+import numpy as np
+import openmeteo_requests
+import pandas as pd
+import requests_cache
+from retry_requests import retry
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +51,7 @@ def _fetch_batch(
     }
     responses = client.weather_api(ERA5_URL, params=params)
     frames = []
-    for r, lat, lon in zip(responses, lats, lons):
+    for r, lat, lon in zip(responses, lats, lons, strict=False):
         hourly = r.Hourly()
         timestamps = pd.date_range(
             start=pd.Timestamp(hourly.Time(), unit="s", tz="UTC"),
@@ -74,17 +76,17 @@ def fetch_era5_grid(
     """Fetch ERA5-Land for all grid points using batched API calls.
 
     Uses a checkpoint file so interrupted runs resume rather than restart.
-    Each completed batch is appended to the checkpoint file immediately.
+    Each completed batch is written to the checkpoint file immediately so
+    a re-run picks up exactly where it stopped.
 
     Args:
-        checkpoint_dir: Directory to store batch checkpoints. Defaults to
-                        the system temp directory. Set to None to disable.
+        checkpoint_dir: Directory to store the running checkpoint parquet.
+                        Set to None to disable checkpointing.
     """
     client = _build_client()
-    pairs = list(zip(lat_points, lon_points))
+    pairs = list(zip(lat_points, lon_points, strict=False))
     n_batches = (len(pairs) + BATCH_SIZE - 1) // BATCH_SIZE
 
-    # Checkpoint: track which batch indices are already done
     if checkpoint_dir is not None:
         checkpoint_dir = Path(checkpoint_dir)
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -98,8 +100,7 @@ def fetch_era5_grid(
     if checkpoint_path and checkpoint_path.exists():
         prev = pd.read_parquet(checkpoint_path)
         completed_frames.append(prev)
-        # Infer which pairs are already downloaded
-        done_pairs = set(zip(prev["lat"].round(6), prev["lon"].round(6)))
+        done_pairs = set(zip(prev["lat"].round(6), prev["lon"].round(6), strict=False))
         for i in range(0, len(pairs), BATCH_SIZE):
             batch = pairs[i: i + BATCH_SIZE]
             if all((round(p[0], 6), round(p[1], 6)) in done_pairs for p in batch):
@@ -123,7 +124,6 @@ def fetch_era5_grid(
         try:
             frame = _fetch_batch(client, b_lats, b_lons, start_date, end_date)
             completed_frames.append(frame)
-            # Write checkpoint after every successful batch
             if checkpoint_path:
                 pd.concat(completed_frames, ignore_index=True).to_parquet(
                     checkpoint_path, index=False
@@ -132,7 +132,6 @@ def fetch_era5_grid(
         except Exception as exc:
             logger.error(f"ERA5 | batch {batch_num}/{n_batches} FAILED: {exc}")
             logger.error("ERA5 | stopping — re-run the script to resume from checkpoint")
-            # Return whatever we have so far rather than crashing
             break
 
         if i + BATCH_SIZE < len(pairs):
@@ -150,7 +149,6 @@ def build_thailand_grid(spacing_deg: float = 0.25) -> tuple[List[float], List[fl
     """Generate regular grid points covering Thailand bounding box."""
     lats = list(np.arange(5.5, 20.5, spacing_deg))
     lons = list(np.arange(97.5, 105.7, spacing_deg))
-    # Build (lat, lon) pairs as a meshgrid: all lons for each lat
     lat_list = [lat for lat in lats for _ in lons]
     lon_list = [lon for _ in lats for lon in lons]
     return lat_list, lon_list

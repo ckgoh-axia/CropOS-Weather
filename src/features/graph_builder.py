@@ -1,9 +1,11 @@
 """Build heterogeneous PyTorch Geometric graph for CropOS."""
 from __future__ import annotations
+
 import math
+from typing import Any, Dict, List
+
 import torch
 from torch_geometric.data import HeteroData
-from typing import List, Dict, Any
 
 
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -44,7 +46,9 @@ def build_heterogeneous_graph(
     retraining (SAGEConv weights are shared, not per-node-identity).
     """
     data = HeteroData()
-    data["era5"].x = torch.tensor([n["feats"] for n in era5_nodes], dtype=torch.float)
+    data["era5"].x = torch.tensor(
+        [n["feats"] for n in era5_nodes], dtype=torch.float
+    )
     data["local_station"].x = torch.tensor(
         [n["feats"] for n in local_station_nodes], dtype=torch.float
     )
