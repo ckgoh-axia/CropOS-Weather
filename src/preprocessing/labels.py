@@ -30,8 +30,8 @@ def build_labels(
 
     Args:
         metar_df: Output of fetch_all_thai_stations(). Must have columns:
-                  station, valid, p01i (precip in inches, NaN if missing),
-                  lat, lon.
+                  station, timestamp, precip_mm (already in mm), lat, lon.
+                  parse_metar_response() handles the p01i→mm conversion upstream.
         era5_df:  Output of fetch_era5_grid(). Must have columns:
                   lat, lon, timestamp, precipitation_sum (m/h or mm/h).
         precip_threshold_mm: Rain/no-rain threshold in mm. Default 1.0 mm/h.
@@ -62,16 +62,15 @@ def build_labels(
 
 
 def _extract_metar_labels(metar_df: pd.DataFrame) -> pd.DataFrame:
-    """Convert METAR p01i (inches/hour) to mm and drop missing values."""
+    """Extract METAR precipitation labels from fetch_all_thai_stations() output.
+
+    parse_metar_response() already converts p01i (inches) → precip_mm and
+    renames 'valid' → 'timestamp', so we consume those columns directly.
+    """
     df = metar_df.copy()
 
-    # Iowa State ASOS returns p01i in inches; convert to mm
-    INCHES_TO_MM = 25.4
-    df["precip_mm"] = pd.to_numeric(df["p01i"], errors="coerce") * INCHES_TO_MM
-
-    # Rename timestamp column (Iowa ASOS uses 'valid')
-    if "valid" in df.columns and "timestamp" not in df.columns:
-        df = df.rename(columns={"valid": "timestamp"})
+    # precip_mm is already in mm (converted from inches by parse_metar_response)
+    df["precip_mm"] = pd.to_numeric(df["precip_mm"], errors="coerce")
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
 
     # Drop rows without a gauge reading

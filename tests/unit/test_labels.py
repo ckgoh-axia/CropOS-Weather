@@ -17,22 +17,28 @@ def _ts(s):
 # ── _extract_metar_labels ──────────────────────────────────────────────────────
 
 def _metar_df():
+    """Matches the output format of fetch_all_thai_stations() / parse_metar_response().
+
+    parse_metar_response() already converts p01i (inches) → precip_mm and
+    renames 'valid' → 'timestamp', so the labels module receives these columns.
+    """
     return pd.DataFrame({
         "station": ["VTBS", "VTBS", "VTBS"],
-        "valid": [_ts("2023-06-01 00:00"), _ts("2023-06-01 01:00"), _ts("2023-06-01 02:00")],
-        "p01i": [0.0, 0.05, None],  # 0, 0.05 inches, missing
+        "timestamp": [_ts("2023-06-01 00:00"), _ts("2023-06-01 01:00"), _ts("2023-06-01 02:00")],
+        "precip_mm": [0.0, 1.27, None],  # already in mm; None simulates missing gauge
+        "rain_event": [False, True, False],
         "lat": [13.69, 13.69, 13.69],
         "lon": [100.75, 100.75, 100.75],
     })
 
 
-def test_extract_metar_converts_inches_to_mm():
+def test_extract_metar_passthrough_mm():
+    """precip_mm passes through unchanged (no second inches→mm conversion)."""
     result = _extract_metar_labels(_metar_df())
-    # 0.05 in × 25.4 = 1.27 mm
     assert abs(result.iloc[1]["precip_mm"] - 1.27) < 0.01
 
 
-def test_extract_metar_drops_null_p01i():
+def test_extract_metar_drops_null_precip():
     result = _extract_metar_labels(_metar_df())
     assert len(result) == 2  # third row (None) dropped
 
@@ -48,12 +54,9 @@ def test_extract_metar_has_required_columns():
         assert col in result.columns
 
 
-def test_extract_metar_renames_valid_to_timestamp():
-    df = _metar_df()
-    assert "valid" in df.columns
-    result = _extract_metar_labels(df)
+def test_extract_metar_timestamp_column_present():
+    result = _extract_metar_labels(_metar_df())
     assert "timestamp" in result.columns
-    assert "valid" not in result.columns
 
 
 # ── _extract_era5_labels ───────────────────────────────────────────────────────
@@ -113,8 +116,8 @@ def test_build_labels_metar_takes_priority():
     ts = _ts("2023-06-01 00:00")
     metar = pd.DataFrame({
         "station": ["VTBS"],
-        "valid": [ts],
-        "p01i": [0.10],  # 2.54 mm
+        "timestamp": [ts],
+        "precip_mm": [2.54],
         "lat": [13.69],
         "lon": [100.75],
     })
@@ -138,8 +141,8 @@ def test_build_labels_rain_flag_respects_threshold():
     ts = _ts("2023-06-01 00:00")
     metar = pd.DataFrame({
         "station": ["VTBS", "VTBS"],
-        "valid": [ts, _ts("2023-06-01 01:00")],
-        "p01i": [0.02, 0.0],  # 0.508mm and 0mm
+        "timestamp": [ts, _ts("2023-06-01 01:00")],
+        "precip_mm": [0.508, 0.0],  # 0.508mm < 1mm threshold, 0mm
         "lat": [13.69, 13.69],
         "lon": [100.75, 100.75],
     })
@@ -156,8 +159,8 @@ def test_build_labels_rain_flag_respects_threshold():
 def test_build_labels_output_columns():
     ts = _ts("2023-06-01 00:00")
     metar = pd.DataFrame({
-        "station": ["VTBS"], "valid": [ts],
-        "p01i": [0.0], "lat": [13.69], "lon": [100.75],
+        "station": ["VTBS"], "timestamp": [ts],
+        "precip_mm": [0.0], "lat": [13.69], "lon": [100.75],
     })
     era5 = pd.DataFrame({
         "lat": [15.0], "lon": [102.0],
