@@ -1,8 +1,7 @@
 # tests/unit/test_era5.py
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pandas as pd
-import pytest
 
 from src.ingestion.era5 import ERA5_VARIABLES, build_thailand_grid, fetch_era5_grid
 
@@ -71,9 +70,6 @@ def test_fetch_era5_grid_resumes_from_checkpoint(tmp_path):
     """Second call skips already-completed batches."""
     mock_df = _make_mock_batch_df()
     call_count = {"n": 0}
-    original_fetch = __import__(
-        "src.ingestion.era5", fromlist=["_fetch_batch"]
-    )._fetch_batch
 
     def counting_fetch(*args, **kwargs):
         call_count["n"] += 1

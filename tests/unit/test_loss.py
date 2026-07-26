@@ -1,7 +1,7 @@
 # tests/unit/test_loss.py
 """Tests for BrierCSILoss — combined Brier + soft-CSI training loss."""
-import torch
 import pytest
+import torch
 
 from src.training.loss import BrierCSILoss
 

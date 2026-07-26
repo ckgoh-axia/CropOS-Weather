@@ -1,5 +1,4 @@
 # tests/unit/test_graph_builder.py
-import torch
 
 from src.features.graph_builder import build_heterogeneous_graph, haversine_km
 

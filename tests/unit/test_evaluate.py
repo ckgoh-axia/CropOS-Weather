@@ -10,7 +10,6 @@ from src.training.evaluate import (
     false_negative_rate,
 )
 
-
 # ── brier_score ───────────────────────────────────────────────────────────────
 
 def test_brier_perfect_forecast_is_zero():
