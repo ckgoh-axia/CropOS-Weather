@@ -25,7 +25,7 @@ def _get_model() -> CropOSGNN:
     if _model is None:
         m = CropOSGNN(era5_in=7, metar_in=5, hidden=128, n_horizons=len(HORIZONS))
         if os.path.exists(MODEL_PATH):
-            m.load_state_dict(torch.load(MODEL_PATH, map_location="cpu"))
+            m.load_state_dict(torch.load(MODEL_PATH, map_location="cpu", weights_only=True))
             logger.info(f"Model loaded from {MODEL_PATH}")
         else:
             logger.warning(f"No checkpoint at {MODEL_PATH} — using random weights")
