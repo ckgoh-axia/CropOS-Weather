@@ -34,7 +34,8 @@ def download_era5(cfg: dict, start: str, end: str, outdir: Path) -> Path:
 
     logger.info("ERA5 | starting download (0.25° grid over Thailand)...")
     lat_pts, lon_pts = build_thailand_grid(spacing_deg=0.25)
-    era5_df = fetch_era5_grid(lat_pts, lon_pts, start, end)
+    checkpoint_dir = outdir / ".era5_checkpoint"
+    era5_df = fetch_era5_grid(lat_pts, lon_pts, start, end, checkpoint_dir=checkpoint_dir)
     path = outdir / "era5_thailand.parquet"
     era5_df.to_parquet(path, index=False)
     logger.info(f"ERA5 | {len(era5_df):,} rows → {path}")

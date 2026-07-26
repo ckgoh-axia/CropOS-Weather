@@ -3,11 +3,19 @@ from __future__ import annotations
 import httpx
 import pandas as pd
 import logging
+import time
 from typing import List
 
 logger = logging.getLogger(__name__)
 
 IOWA_STATE_URL = "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py"
+
+# Timeout per yearly chunk request. Iowa State ASOS returns ~8,760 rows per
+# station-year as CSV (~500 KB); 300s is generous even on slow connections.
+REQUEST_TIMEOUT_S = 300.0
+
+# Delay between station requests to avoid hammering Iowa State
+STATION_DELAY_S = 2.0
 
 THAI_METAR_STATIONS: List[str] = [
     "VTUU", "VTUD", "VTUK", "VTUB", "VTUN", "VTUL",
@@ -28,35 +36,73 @@ STATION_COORDS: dict[str, tuple[float, float]] = {
 }
 
 
-def fetch_metar_station(
+def _fetch_station_year(
     station: str,
-    start_date: str,
-    end_date: str,
-    timeout: float = 60.0,
+    year: int,
+    client: httpx.Client,
 ) -> pd.DataFrame:
-    """Fetch hourly METAR data for one ICAO station from Iowa State ASOS archive."""
+    """Fetch one calendar year of METAR data for a single station."""
     params = {
         "station": station,
         "data": "all",
-        "year1": start_date[:4],   "month1": start_date[5:7],  "day1": start_date[8:10],
-        "year2": end_date[:4],     "month2": end_date[5:7],    "day2": end_date[8:10],
+        "year1": str(year),   "month1": "1",  "day1": "1",
+        "year2": str(year),   "month2": "12", "day2": "31",
         "tz": "Etc/UTC",
         "format": "comma",
         "latlon": "yes",
         "direct": "yes",
-        "report_type": "1",  # routine hourly only
+        "report_type": "1",  # routine METAR (hourly) observations only
     }
-    with httpx.Client(timeout=timeout) as client:
-        resp = client.get(IOWA_STATE_URL, params=params)
-        resp.raise_for_status()
+    resp = client.get(IOWA_STATE_URL, params=params)
+    resp.raise_for_status()
     return parse_metar_response(resp.text)
+
+
+def fetch_metar_station(
+    station: str,
+    start_date: str,
+    end_date: str,
+) -> pd.DataFrame:
+    """Fetch METAR for one station across the full date range.
+
+    Splits the request into one HTTP call per calendar year so each
+    individual request stays small (~500 KB) and never times out.
+    """
+    start_year = int(start_date[:4])
+    end_year = int(end_date[:4])
+    yearly_frames: List[pd.DataFrame] = []
+
+    with httpx.Client(timeout=REQUEST_TIMEOUT_S) as client:
+        for year in range(start_year, end_year + 1):
+            try:
+                df = _fetch_station_year(station, year, client)
+                if len(df) > 0:
+                    yearly_frames.append(df)
+                    logger.info(f"METAR | {station} {year}: {len(df):,} rows")
+                else:
+                    logger.warning(f"METAR | {station} {year}: 0 rows returned")
+            except Exception as exc:
+                logger.warning(f"METAR | {station} {year} failed: {exc}")
+
+    if not yearly_frames:
+        # Return empty DataFrame with the correct schema so concat doesn't crash
+        return pd.DataFrame(columns=[
+            "station", "timestamp", "precip_mm", "rain_event",
+            "tmpf", "dwpf", "relh", "drct", "sknt", "alti", "vsby",
+        ])
+    return pd.concat(yearly_frames, ignore_index=True)
 
 
 def parse_metar_response(csv_text: str) -> pd.DataFrame:
     """Parse Iowa State ASOS CSV into a clean DataFrame."""
     from io import StringIO
     lines = [ln for ln in csv_text.splitlines() if not ln.startswith("#") and ln.strip()]
+    if len(lines) <= 1:
+        # Only header line (or empty) — no data for this station/period
+        return pd.DataFrame()
     df = pd.read_csv(StringIO("\n".join(lines)), low_memory=False)
+    if df.empty:
+        return df
     df = df.rename(columns={"valid": "timestamp"})
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
     df["precip_mm"] = pd.to_numeric(df.get("p01i", 0), errors="coerce").fillna(0) * 25.4
@@ -71,14 +117,25 @@ def parse_metar_response(csv_text: str) -> pd.DataFrame:
 def fetch_all_thai_stations(start_date: str, end_date: str) -> pd.DataFrame:
     """Fetch METAR for all 16 Thai stations and concatenate into one DataFrame."""
     frames = []
-    for station in THAI_METAR_STATIONS:
-        logger.info(f"Fetching METAR: {station} {start_date}→{end_date}")
-        try:
-            df = fetch_metar_station(station, start_date, end_date)
+    for i, station in enumerate(THAI_METAR_STATIONS):
+        logger.info(f"METAR | station {i+1}/{len(THAI_METAR_STATIONS)}: {station}")
+        df = fetch_metar_station(station, start_date, end_date)
+        if len(df) > 0:
             lat, lon = STATION_COORDS[station]
             df["lat"] = lat
             df["lon"] = lon
             frames.append(df)
-        except Exception as exc:
-            logger.warning(f"Failed {station}: {exc}")
-    return pd.concat(frames, ignore_index=True)
+        else:
+            logger.warning(f"METAR | {station}: no data — skipping")
+        if i < len(THAI_METAR_STATIONS) - 1:
+            time.sleep(STATION_DELAY_S)
+
+    if not frames:
+        logger.error("METAR | all 16 stations returned no data")
+        return pd.DataFrame(columns=[
+            "station", "timestamp", "precip_mm", "rain_event",
+            "tmpf", "dwpf", "relh", "drct", "sknt", "alti", "vsby", "lat", "lon",
+        ])
+    result = pd.concat(frames, ignore_index=True)
+    logger.info(f"METAR | total: {len(result):,} rows across {result['station'].nunique()} stations")
+    return result
