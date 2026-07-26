@@ -35,10 +35,14 @@ def test_full_pipeline_metar_to_graph_to_gnn():
     assert all(qc_df["qc_flag"] == "ok")
 
     # 3. Build graph
-    era5_nodes = [{"lat": 15.0, "lon": 104.0, "feats": [28.0, 26.0, 80.0, 0.0, 8.0, 180.0, 1010.0]}]
-    local_station_nodes = [{"lat": 15.25, "lon": 104.87, "feats": [3.05, 1.0, 80.6, 74.3, 8.0]}]
+    era5_nodes = [{"lat": 15.0, "lon": 104.0,
+                   "feats": [28.0, 26.0, 80.0, 0.0, 8.0, 180.0, 1010.0]}]
+    local_station_nodes = [{"lat": 15.25, "lon": 104.87,
+                            "feats": [3.05, 1.0, 80.6, 74.3, 8.0]}]
     farm_nodes = [{"lat": 15.1, "lon": 104.5, "farm_id": "test_farm"}]
-    graph = build_heterogeneous_graph(era5_nodes, local_station_nodes, farm_nodes, edge_radius_km=200)
+    graph = build_heterogeneous_graph(
+        era5_nodes, local_station_nodes, farm_nodes, edge_radius_km=200
+    )
     assert "farm" in graph.node_types
 
     # 4. GNN forward pass
