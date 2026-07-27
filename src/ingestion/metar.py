@@ -19,6 +19,11 @@ REQUEST_TIMEOUT_S = 300.0
 # Delay between stations to be polite to Iowa State ASOS
 STATION_DELAY_S = 2.0
 
+# Delay between yearly requests within a single station.
+# Iowa State 429s on the second request if fired within ~1s of the first.
+# 5s is conservative and keeps total METAR download under 20 minutes.
+INTER_YEAR_DELAY_S = 5.0
+
 THAI_METAR_STATIONS: List[str] = [
     "VTUU", "VTUD", "VTUK", "VTUB", "VTUN", "VTUL",
     "VTCC", "VTCP", "VTCN", "VTBS", "VTBD", "VTBP",
@@ -72,8 +77,9 @@ def fetch_metar_station(
     end_year = int(end_date[:4])
     yearly_frames: List[pd.DataFrame] = []
 
+    years = list(range(start_year, end_year + 1))
     with httpx.Client(timeout=REQUEST_TIMEOUT_S) as client:
-        for year in range(start_year, end_year + 1):
+        for idx, year in enumerate(years):
             try:
                 df = _fetch_station_year(station, year, client)
                 if len(df) > 0:
@@ -83,6 +89,10 @@ def fetch_metar_station(
                     logger.warning(f"METAR | {station} {year}: 0 rows returned")
             except Exception as exc:
                 logger.warning(f"METAR | {station} {year} failed: {exc}")
+            # Throttle between yearly requests to avoid Iowa State 429 rate limit.
+            # Without this delay every request after the first 429s immediately.
+            if idx < len(years) - 1:
+                time.sleep(INTER_YEAR_DELAY_S)
 
     if not yearly_frames:
         return pd.DataFrame(columns=[

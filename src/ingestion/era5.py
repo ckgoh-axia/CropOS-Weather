@@ -21,10 +21,11 @@ ERA5_VARIABLES = [
 ]
 ERA5_URL = "https://archive-api.open-meteo.com/v1/era5"
 
-# archive-api.open-meteo.com is much stricter than the forecast endpoint.
-# 10 points per call and 15s between calls keeps us safely within the free tier.
+# archive-api.open-meteo.com free tier: 2 requests/minute hard limit.
+# 65s between batches guarantees ≤1/minute regardless of download time.
+# 198 batches × ~70s each ≈ 3.9 hours — well under GitHub Actions 6h limit.
 BATCH_SIZE = 10
-BATCH_DELAY_S = 15.0
+BATCH_DELAY_S = 65.0
 
 
 def _build_client() -> openmeteo_requests.Client:

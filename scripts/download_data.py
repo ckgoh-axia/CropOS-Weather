@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -161,6 +162,16 @@ def main() -> None:
     logger.info("Phase 1: ERA5 (archive-api.open-meteo.com — sequential to avoid rate limits)")
     results["era5"] = download_era5(cfg, start, end, outdir)
     logger.info("✓ era5 complete")
+
+    # Open-Meteo has a global per-IP rate limit across all their endpoints.
+    # ERA5 just used the last available request slot; wait for the window to clear
+    # before starting NWP (which also hits Open-Meteo).
+    RATE_LIMIT_COOLDOWN_S = 65
+    logger.info(
+        f"Cooling down {RATE_LIMIT_COOLDOWN_S}s for Open-Meteo rate limit to reset "
+        f"before Phase 2..."
+    )
+    time.sleep(RATE_LIMIT_COOLDOWN_S)
 
     # METAR (Iowa State) and NWP (Open-Meteo forecast API) hit different servers
     # so they can safely run in parallel.
