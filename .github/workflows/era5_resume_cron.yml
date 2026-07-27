@@ -1,0 +1,27 @@
+name: ERA5 Resume (cron every 2h)
+on:
+  schedule:
+    - cron: "0 */2 * * *"
+  workflow_dispatch:
+
+jobs:
+  era5-resume:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          pip install \
+            openmeteo-requests requests-cache retry-requests \
+            pandas numpy pyyaml \
+            huggingface-hub pyarrow httpx
+      - name: Resume ERA5 from HF checkpoint
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          python scripts/augment_data.py --era5-only
