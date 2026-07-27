@@ -117,6 +117,11 @@ def parse_metar_response(csv_text: str) -> pd.DataFrame:
     wxcodes = df.get("wxcodes", pd.Series([""] * len(df))).fillna("")
     df["rain_event"] = wxcodes.str.contains(r"\bRA\b|\bTS\b|\bSH\b", regex=True)
     df["station"] = df["station"].str.strip()
+    # Iowa State ASOS uses "M" for missing values; coerce to float so PyArrow
+    # can serialize the parquet without ArrowTypeError on object columns.
+    for col in ["tmpf", "dwpf", "relh", "drct", "sknt", "alti", "vsby"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
     keep = ["station", "timestamp", "precip_mm", "rain_event",
             "tmpf", "dwpf", "relh", "drct", "sknt", "alti", "vsby"]
     return df[[c for c in keep if c in df.columns]].reset_index(drop=True)
