@@ -6,8 +6,10 @@ Sources (all free, no special accounts):
   - METAR via Iowa State ASOS: surface observations at 16 Thai airports
   - NWP baseline via Open-Meteo: GFS forecasts for Brier Skill Score comparison
 
-All three sources download in parallel. On completion, parquet files are
-pushed to a private HuggingFace Dataset repo (auto-created if absent).
+ERA5 is rate-limited to ~5 requests/hour on Open-Meteo's free archive API.
+The checkpoint is persisted to HuggingFace after every batch so GitHub Actions
+re-runs resume exactly where the previous run stopped rather than restarting.
+See .github/workflows/download_era5_cron.yml for the scheduled auto-resume.
 """
 from __future__ import annotations
 
@@ -28,16 +30,73 @@ HF_DATASET_REPO_NAME = "cropos-data"
 
 
 # ---------------------------------------------------------------------------
+# ERA5 checkpoint helpers
+# ---------------------------------------------------------------------------
+
+def _pull_era5_checkpoint_from_hf(checkpoint_dir: Path, repo_id: str, token: str) -> None:
+    """Pull ERA5 checkpoint from HuggingFace if available.
+
+    GitHub Actions runners are ephemeral — without this, every run restarts
+    ERA5 from batch 1 and hits the hourly limit before making real progress.
+    With this, each run resumes from the last saved checkpoint.
+    """
+    from huggingface_hub import hf_hub_download
+
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = checkpoint_dir / "era5_checkpoint.parquet"
+
+    if checkpoint_path.exists():
+        logger.info("ERA5 | local checkpoint found — skipping HF pull")
+        return
+
+    try:
+        hf_hub_download(
+            repo_id=repo_id,
+            filename="era5_checkpoint.parquet",
+            repo_type="dataset",
+            token=token,
+            local_dir=str(checkpoint_dir),
+        )
+        size_mb = checkpoint_path.stat().st_size / 1024 / 1024
+        logger.info(f"ERA5 | checkpoint restored from HF ({size_mb:.1f} MB) — resuming")
+    except Exception as exc:
+        logger.info(f"ERA5 | no HF checkpoint found (starting fresh): {exc}")
+
+
+# ---------------------------------------------------------------------------
 # Download helpers
 # ---------------------------------------------------------------------------
 
-def download_era5(cfg: dict, start: str, end: str, outdir: Path) -> Path:
+def download_era5(
+    cfg: dict,
+    start: str,
+    end: str,
+    outdir: Path,
+    repo_id: str | None = None,
+    hf_token: str | None = None,
+) -> Path:
     from src.ingestion.era5 import build_thailand_grid, fetch_era5_grid
+
+    checkpoint_dir = outdir / ".era5_checkpoint"
+
+    # Restore checkpoint from HF so this run resumes from where the last one stopped.
+    if repo_id and hf_token:
+        _pull_era5_checkpoint_from_hf(checkpoint_dir, repo_id, hf_token)
 
     logger.info("ERA5 | starting download (0.25° grid over Thailand)...")
     lat_pts, lon_pts = build_thailand_grid(spacing_deg=0.25)
-    checkpoint_dir = outdir / ".era5_checkpoint"
-    era5_df = fetch_era5_grid(lat_pts, lon_pts, start, end, checkpoint_dir=checkpoint_dir)
+
+    try:
+        era5_df = fetch_era5_grid(lat_pts, lon_pts, start, end, checkpoint_dir=checkpoint_dir)
+    finally:
+        # Always push checkpoint to HF — even on partial runs (hourly rate limit hit).
+        # This is what makes the next retrigger resume rather than restart.
+        if repo_id and hf_token:
+            checkpoint_path = checkpoint_dir / "era5_checkpoint.parquet"
+            if checkpoint_path.exists():
+                push_to_hf(checkpoint_path, repo_id, hf_token)
+                logger.info("ERA5 | checkpoint pushed to HF — next run will resume here")
+
     path = outdir / "era5_thailand.parquet"
     era5_df.to_parquet(path, index=False)
     logger.info(f"ERA5 | {len(era5_df):,} rows → {path}")
@@ -56,8 +115,6 @@ def download_metar(cfg: dict, start: str, end: str, outdir: Path) -> Path:
 
 
 def download_nwp(cfg: dict, start: str, end: str, outdir: Path) -> Path:
-    import time
-
     import pandas as pd
 
     from src.ingestion.metar import STATION_COORDS
@@ -156,16 +213,15 @@ def main() -> None:
     else:
         repo_id = None
 
-    # ERA5 runs first alone — it and NWP both hit Open-Meteo, running them
-    # simultaneously triggers rate limits on the archive API.
+    # Phase 1: ERA5 — runs alone (archive-api.open-meteo.com is rate-limited).
+    # Checkpoint is pushed to HF after each batch so the next run can resume.
     results: dict[str, Path] = {}
-    logger.info("Phase 1: ERA5 (archive-api.open-meteo.com — sequential to avoid rate limits)")
-    results["era5"] = download_era5(cfg, start, end, outdir)
-    logger.info("✓ era5 complete")
+    logger.info("Phase 1: ERA5 (archive-api.open-meteo.com — sequential, HF checkpoint)")
+    results["era5"] = download_era5(cfg, start, end, outdir, repo_id=repo_id, hf_token=token)
+    logger.info("✓ era5 phase complete")
 
     # Open-Meteo has a global per-IP rate limit across all their endpoints.
-    # ERA5 just used the last available request slot; wait for the window to clear
-    # before starting NWP (which also hits Open-Meteo).
+    # Let the rate limit window clear before starting NWP (also Open-Meteo).
     RATE_LIMIT_COOLDOWN_S = 65
     logger.info(
         f"Cooling down {RATE_LIMIT_COOLDOWN_S}s for Open-Meteo rate limit to reset "
@@ -173,8 +229,8 @@ def main() -> None:
     )
     time.sleep(RATE_LIMIT_COOLDOWN_S)
 
-    # METAR (Iowa State) and NWP (Open-Meteo forecast API) hit different servers
-    # so they can safely run in parallel.
+    # Phase 2: METAR (Iowa State) + NWP (Open-Meteo forecast API) in parallel.
+    # Different servers so they can run concurrently.
     logger.info("Phase 2: METAR + NWP in parallel")
     tasks = {
         "metar": lambda: download_metar(cfg, start, end, outdir),
