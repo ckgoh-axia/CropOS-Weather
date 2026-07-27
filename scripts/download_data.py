@@ -155,15 +155,21 @@ def main() -> None:
     else:
         repo_id = None
 
-    # Download all three sources in parallel
+    # ERA5 runs first alone — it and NWP both hit Open-Meteo, running them
+    # simultaneously triggers rate limits on the archive API.
+    results: dict[str, Path] = {}
+    logger.info("Phase 1: ERA5 (archive-api.open-meteo.com — sequential to avoid rate limits)")
+    results["era5"] = download_era5(cfg, start, end, outdir)
+    logger.info("✓ era5 complete")
+
+    # METAR (Iowa State) and NWP (Open-Meteo forecast API) hit different servers
+    # so they can safely run in parallel.
+    logger.info("Phase 2: METAR + NWP in parallel")
     tasks = {
-        "era5": lambda: download_era5(cfg, start, end, outdir),
         "metar": lambda: download_metar(cfg, start, end, outdir),
         "nwp": lambda: download_nwp(cfg, start, end, outdir),
     }
-
-    results: dict[str, Path] = {}
-    with ThreadPoolExecutor(max_workers=3) as executor:
+    with ThreadPoolExecutor(max_workers=2) as executor:
         futures = {executor.submit(fn): name for name, fn in tasks.items()}
         for future in as_completed(futures):
             name = futures[future]

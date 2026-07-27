@@ -52,7 +52,6 @@ def _fetch_station_year(
         "format": "comma",
         "latlon": "yes",
         "direct": "yes",
-        "report_type": "1",  # routine METAR (hourly) observations only
     }
     resp = client.get(IOWA_STATE_URL, params=params)
     resp.raise_for_status()
