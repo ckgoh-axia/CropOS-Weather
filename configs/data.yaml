@@ -50,8 +50,8 @@ nwp_variables:
   # CAPE is the single most important variable missing from the original set
   - cape
   - lifted_index
-  # Full moisture column (not just surface dewpoint)
-  - precipitable_water
+  # NOTE: precipitable_water rejected by gfs_seamless historical-forecast-api —
+  # omitted until correct variable name is confirmed for this endpoint.
   # Cloud layer structure — total cover doesn't distinguish anvil from BL cloud
   # Low = boundary layer cloud, Mid = congestus/altostratus, High = cirrus/anvil
   - cloudcover_low

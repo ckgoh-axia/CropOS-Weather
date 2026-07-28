@@ -269,7 +269,12 @@ def test_fetch_nwp_at_point_renames_column_to_nwp_precip_mm():
 def test_nwp_default_variables_contains_convective_vars():
     assert "cape" in NWP_DEFAULT_VARIABLES
     assert "lifted_index" in NWP_DEFAULT_VARIABLES
-    assert "precipitable_water" in NWP_DEFAULT_VARIABLES
+
+
+def test_nwp_default_variables_excludes_invalid_api_vars():
+    # precipitable_water is rejected by gfs_seamless historical-forecast-api;
+    # it must stay out of the default list until a valid name is confirmed.
+    assert "precipitable_water" not in NWP_DEFAULT_VARIABLES
 
 
 def test_nwp_default_variables_has_cloud_layers():

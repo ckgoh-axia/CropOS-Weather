@@ -51,8 +51,9 @@ NWP_DEFAULT_VARIABLES: List[str] = [
     # Convective instability — primary drivers of tropical rainfall
     "cape",
     "lifted_index",
-    # Moisture column — full depth, not just surface dewpoint
-    "precipitable_water",
+    # NOTE: precipitable_water is NOT available on gfs_seamless historical-forecast-api.
+    # The API rejects the entire request if this variable is present. Omitted until
+    # a valid column-moisture variable is identified for this endpoint.
     # Cloud layer structure — separate low/mid/high rather than total cover.
     # Low = boundary layer, Mid = congestus/altostratus, High = cirrus/anvil.
     # This separates "humid but capped" from "organised deep convection".
