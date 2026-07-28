@@ -30,37 +30,91 @@ HF_DATASET_REPO_NAME = "cropos-data"
 
 
 # ---------------------------------------------------------------------------
-# ERA5 checkpoint helpers
+# ERA5 checkpoint helpers (per-batch file format)
 # ---------------------------------------------------------------------------
+# Checkpoint layout: one parquet per batch stored in checkpoint_dir locally
+# and under era5_batches/ in the HF dataset repo.  This avoids loading all
+# previously-downloaded ERA5 rows into memory on every new batch write.
+
+# Maximum new batches per cron run.  At 65 s/batch, 4 batches ≈ 5 minutes.
+# Stopping here guarantees a clean shutdown before the rate-limit window
+# closes, so the per-batch checkpoint files are always pushed to HF.
+_ERA5_MAX_BATCHES_PER_RUN = 4
+
 
 def _pull_era5_checkpoint_from_hf(checkpoint_dir: Path, repo_id: str, token: str) -> None:
-    """Pull ERA5 checkpoint from HuggingFace if available.
+    """Pull per-batch ERA5 checkpoint files from HuggingFace.
 
     GitHub Actions runners are ephemeral — without this, every run restarts
-    ERA5 from batch 1 and hits the hourly limit before making real progress.
-    With this, each run resumes from the last saved checkpoint.
+    from batch 0.  Each run pulls the batch files that are already on HF so
+    fetch_era5_grid can skip them and resume from where the last run stopped.
     """
-    from huggingface_hub import hf_hub_download
+    from huggingface_hub import HfApi, hf_hub_download
 
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    checkpoint_path = checkpoint_dir / "era5_checkpoint.parquet"
-
-    if checkpoint_path.exists():
-        logger.info("ERA5 | local checkpoint found — skipping HF pull")
-        return
 
     try:
-        hf_hub_download(
-            repo_id=repo_id,
-            filename="era5_checkpoint.parquet",
-            repo_type="dataset",
-            token=token,
-            local_dir=str(checkpoint_dir),
-        )
-        size_mb = checkpoint_path.stat().st_size / 1024 / 1024
-        logger.info(f"ERA5 | checkpoint restored from HF ({size_mb:.1f} MB) — resuming")
+        api = HfApi()
+        repo_files = list(api.list_repo_files(
+            repo_id=repo_id, repo_type="dataset", token=token
+        ))
     except Exception as exc:
-        logger.info(f"ERA5 | no HF checkpoint found (starting fresh): {exc}")
+        logger.info(f"ERA5 | could not list HF files (starting fresh): {exc}")
+        return
+
+    hf_batch_files = [f for f in repo_files if f.startswith("era5_batches/batch_")]
+    if not hf_batch_files:
+        logger.info("ERA5 | no per-batch checkpoints on HF — starting fresh")
+        return
+
+    pulled = 0
+    for hf_path in hf_batch_files:
+        batch_name = Path(hf_path).name  # e.g. batch_0000.parquet
+        local_path = checkpoint_dir / batch_name
+        if local_path.exists():
+            continue  # already on disk
+        try:
+            hf_hub_download(
+                repo_id=repo_id,
+                filename=hf_path,
+                repo_type="dataset",
+                token=token,
+                local_dir=str(checkpoint_dir),
+            )
+            # hf_hub_download mirrors the HF path under local_dir:
+            #   checkpoint_dir/era5_batches/batch_NNNN.parquet → flatten to checkpoint_dir
+            nested = checkpoint_dir / hf_path  # checkpoint_dir/era5_batches/batch_NNNN.parquet
+            if nested.exists():
+                nested.rename(local_path)
+            pulled += 1
+        except Exception as exc:
+            logger.warning(f"ERA5 | could not pull {batch_name}: {exc}")
+
+    if pulled:
+        logger.info(f"ERA5 | restored {pulled} batch checkpoint files from HF")
+
+
+def _push_era5_batches_to_hf(
+    batch_files: list[Path], repo_id: str, token: str
+) -> None:
+    """Push the given batch parquet files to HF under era5_batches/."""
+    from huggingface_hub import HfApi
+    api = HfApi()
+    pushed = 0
+    for batch_file in sorted(batch_files):
+        try:
+            api.upload_file(
+                path_or_fileobj=str(batch_file),
+                path_in_repo=f"era5_batches/{batch_file.name}",
+                repo_id=repo_id,
+                repo_type="dataset",
+                token=token,
+            )
+            pushed += 1
+        except Exception as exc:
+            logger.warning(f"ERA5 | could not push {batch_file.name}: {exc}")
+    if pushed:
+        logger.info(f"ERA5 | pushed {pushed} batch checkpoint file(s) to HF")
 
 
 # ---------------------------------------------------------------------------
@@ -79,23 +133,46 @@ def download_era5(
 
     checkpoint_dir = outdir / ".era5_checkpoint"
 
-    # Restore checkpoint from HF so this run resumes from where the last one stopped.
+    # Pull per-batch checkpoint files from HF so this runner resumes from
+    # exactly where the previous run stopped rather than restarting from batch 0.
     if repo_id and hf_token:
         _pull_era5_checkpoint_from_hf(checkpoint_dir, repo_id, hf_token)
 
     logger.info("ERA5 | starting download (0.25° grid over Thailand)...")
     lat_pts, lon_pts = build_thailand_grid(spacing_deg=0.25)
 
+    # Snapshot which batch files exist before downloading, so we can push only
+    # the NEW ones afterwards.
+    pre_existing = set(checkpoint_dir.glob("batch_*.parquet")) if checkpoint_dir.exists() else set()
+
     try:
-        era5_df = fetch_era5_grid(lat_pts, lon_pts, start, end, checkpoint_dir=checkpoint_dir)
+        era5_df = fetch_era5_grid(
+            lat_pts, lon_pts, start, end,
+            checkpoint_dir=checkpoint_dir,
+            max_new_batches=_ERA5_MAX_BATCHES_PER_RUN,
+        )
     finally:
-        # Always push checkpoint to HF — even on partial runs (hourly rate limit hit).
-        # This is what makes the next retrigger resume rather than restart.
+        # Push newly downloaded batch files to HF.  This runs even if
+        # fetch_era5_grid raises (e.g. all batches failed on a fresh runner).
+        # Pushing only the new files keeps HF commit history clean.
         if repo_id and hf_token:
-            checkpoint_path = checkpoint_dir / "era5_checkpoint.parquet"
-            if checkpoint_path.exists():
-                push_to_hf(checkpoint_path, repo_id, hf_token)
-                logger.info("ERA5 | checkpoint pushed to HF — next run will resume here")
+            new_batches = sorted(
+                set(checkpoint_dir.glob("batch_*.parquet")) - pre_existing
+            )
+            if new_batches:
+                try:
+                    _push_era5_batches_to_hf(new_batches, repo_id, hf_token)
+                    logger.info(
+                        f"ERA5 | {len(new_batches)} new batch file(s) pushed to HF — "
+                        f"next run will resume here"
+                    )
+                except Exception as push_exc:
+                    logger.error(
+                        f"ERA5 | CHECKPOINT PUSH FAILED — next run will re-download "
+                        f"these batches: {push_exc}"
+                    )
+            else:
+                logger.info("ERA5 | no new batch files this run (all skipped or failed)")
 
     path = outdir / "era5_thailand.parquet"
     era5_df.to_parquet(path, index=False)
