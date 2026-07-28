@@ -204,7 +204,10 @@ def fetch_all_stations(
             if ckpt_file.exists():
                 df = pd.read_parquet(ckpt_file)
                 frames.append(df)
-                logger.info(f"NWP | {station} ({idx+1}/{len(stations)}): restored from checkpoint ({len(df):,} rows)")
+                logger.info(
+                    f"NWP | {station} ({idx+1}/{len(stations)}): "
+                    f"restored from checkpoint ({len(df):,} rows)"
+                )
                 continue
 
         logger.info(f"NWP | {station} ({idx+1}/{len(stations)}): fetching...")
