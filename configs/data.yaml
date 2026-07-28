@@ -23,6 +23,8 @@ metar_stations:
   - VTSG  # Krabi
 
 era5_variables:
+  # Surface — ground truth reanalysis (do NOT change while ERA5 cron is running;
+  # extended variables will be added in a separate era5_extended download pass)
   - temperature_2m
   - dewpoint_2m
   - relativehumidity_2m
@@ -30,6 +32,52 @@ era5_variables:
   - windspeed_10m
   - winddirection_10m
   - surface_pressure
+
+# GFS variables fetched from Open-Meteo historical-forecast API.
+# These are the PRIMARY model input features for the GFS-correction architecture.
+# Naming matches Open-Meteo's GFS seamless model exactly — do not rename without
+# testing against the API, as mismatches cause silent 0-row returns.
+nwp_variables:
+  # Surface — identical naming to ERA5 for clean train/serve feature parity
+  - temperature_2m
+  - dewpoint_2m
+  - relativehumidity_2m
+  - precipitation
+  - windspeed_10m
+  - winddirection_10m
+  - surface_pressure
+  # Convective instability — primary drivers of tropical rainfall
+  # CAPE is the single most important variable missing from the original set
+  - cape
+  - lifted_index
+  # Full moisture column (not just surface dewpoint)
+  - precipitable_water
+  # Cloud layer structure — total cover doesn't distinguish anvil from BL cloud
+  # Low = boundary layer cloud, Mid = congestus/altostratus, High = cirrus/anvil
+  - cloudcover_low
+  - cloudcover_mid
+  - cloudcover_high
+  # Diurnal heating — tropical convection is strongly timing-driven
+  # shortwave_radiation gives actual insolation, not just time-of-day proxy
+  - shortwave_radiation
+  # 700 hPa — mid-level steering layer; slow vs fast-moving convective systems
+  - windspeed_700hPa
+  - winddirection_700hPa
+  # 850 hPa — low-level jet, monsoon moisture transport, boundary-layer convergence
+  - windspeed_850hPa
+  - winddirection_850hPa
+  - temperature_850hPa
+  # 500 hPa — mid-troposphere blocking, trough/ridge position
+  - geopotential_height_500hPa
+  # 200 hPa — jet stream, upper divergence, storm outflow ventilation
+  - windspeed_200hPa
+  - winddirection_200hPa
+  # Land surface — soil moisture feeds afternoon convection
+  - soil_moisture_0_to_7cm
+
+nwp_model: gfs_seamless
+# historical-forecast-api.open-meteo.com only goes back to 2016-01-01
+nwp_min_start: "2016-01-01"
 
 precipitation_label_source: era5  # ERA5 precipitation field; no NASA account required
 precipitation_label_threshold_mm: 1.0  # rain event if ERA5 precip >= 1mm in window
