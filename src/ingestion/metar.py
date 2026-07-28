@@ -48,24 +48,22 @@ STATION_COORDS: dict[str, tuple[float, float]] = {
 # region        : broad climate zone for grouping
 # Sources: ICAO AIP Thailand, DIVA-GIS coastline distance estimates
 STATION_METADATA: dict[str, dict] = {
-    # fmt: off
-    "VTUU": {"elevation_m": 127, "coast_km": 420, "terrain_class": "plain",    "region": "northeast"},
-    "VTUD": {"elevation_m": 177, "coast_km": 310, "terrain_class": "plain",    "region": "northeast"},
-    "VTUK": {"elevation_m": 187, "coast_km": 330, "terrain_class": "plain",    "region": "northeast"},
-    "VTUB": {"elevation_m": 168, "coast_km": 350, "terrain_class": "plain",    "region": "northeast"},
-    "VTUN": {"elevation_m": 205, "coast_km": 290, "terrain_class": "plain",    "region": "northeast"},
-    "VTUL": {"elevation_m": 246, "coast_km": 340, "terrain_class": "valley",   "region": "northeast"},
-    "VTCC": {"elevation_m": 316, "coast_km": 130, "terrain_class": "valley",   "region": "north"},
-    "VTCP": {"elevation_m":  38, "coast_km": 110, "terrain_class": "plain",    "region": "north"},
+    "VTUU": {"elevation_m": 127, "coast_km": 420, "terrain_class": "plain", "region": "northeast"},
+    "VTUD": {"elevation_m": 177, "coast_km": 310, "terrain_class": "plain", "region": "northeast"},
+    "VTUK": {"elevation_m": 187, "coast_km": 330, "terrain_class": "plain", "region": "northeast"},
+    "VTUB": {"elevation_m": 168, "coast_km": 350, "terrain_class": "plain", "region": "northeast"},
+    "VTUN": {"elevation_m": 205, "coast_km": 290, "terrain_class": "plain", "region": "northeast"},
+    "VTUL": {"elevation_m": 246, "coast_km": 340, "terrain_class": "valley", "region": "northeast"},
+    "VTCC": {"elevation_m": 316, "coast_km": 130, "terrain_class": "valley", "region": "north"},
+    "VTCP": {"elevation_m": 38, "coast_km": 110, "terrain_class": "plain", "region": "north"},
     "VTCN": {"elevation_m": 210, "coast_km": 230, "terrain_class": "mountain", "region": "north"},
-    "VTBS": {"elevation_m":   2, "coast_km":  25, "terrain_class": "coastal",  "region": "central"},
-    "VTBD": {"elevation_m":   2, "coast_km":  40, "terrain_class": "urban",    "region": "central"},
-    "VTBP": {"elevation_m":  25, "coast_km":  90, "terrain_class": "plain",    "region": "central"},
-    "VTSS": {"elevation_m":   9, "coast_km":  20, "terrain_class": "coastal",  "region": "south"},
-    "VTSP": {"elevation_m":   8, "coast_km":   5, "terrain_class": "coastal",  "region": "south"},
-    "VTSH": {"elevation_m":  18, "coast_km":  15, "terrain_class": "coastal",  "region": "south"},
-    "VTSG": {"elevation_m":   8, "coast_km":   8, "terrain_class": "coastal",  "region": "south"},
-    # fmt: on
+    "VTBS": {"elevation_m": 2, "coast_km": 25, "terrain_class": "coastal", "region": "central"},
+    "VTBD": {"elevation_m": 2, "coast_km": 40, "terrain_class": "urban", "region": "central"},
+    "VTBP": {"elevation_m": 25, "coast_km": 90, "terrain_class": "plain", "region": "central"},
+    "VTSS": {"elevation_m": 9, "coast_km": 20, "terrain_class": "coastal", "region": "south"},
+    "VTSP": {"elevation_m": 8, "coast_km": 5, "terrain_class": "coastal", "region": "south"},
+    "VTSH": {"elevation_m": 18, "coast_km": 15, "terrain_class": "coastal", "region": "south"},
+    "VTSG": {"elevation_m": 8, "coast_km": 8, "terrain_class": "coastal", "region": "south"},
 }
 
 

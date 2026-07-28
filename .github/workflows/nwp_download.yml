@@ -1,10 +1,8 @@
-name: ERA5 Resume (cron every 2h)
+name: NWP Features Download (one-shot)
 on:
-  schedule:
-    - cron: "0 */2 * * *"
   workflow_dispatch:
 jobs:
-  era5-resume:
+  nwp-download:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
@@ -16,10 +14,9 @@ jobs:
         run: |
           pip install openmeteo-requests requests-cache retry-requests \
             pandas numpy pyyaml huggingface-hub pyarrow httpx
-      - name: Resume ERA5 from HF checkpoint
+      - name: Download NWP features
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           PYTHONPATH: ${{ github.workspace }}
         run: |
-          python scripts/augment_data.py --era5-only \
-            --start "2015-01-01" --end "2022-12-31"
+          python scripts/augment_data.py --nwp-only
