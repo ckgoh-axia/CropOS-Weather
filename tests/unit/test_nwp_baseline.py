@@ -12,11 +12,11 @@ The Open-Meteo response object has this shape:
 from __future__ import annotations
 
 import logging
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pandas as pd
 import pytest
-from unittest.mock import MagicMock, patch
 
 from src.ingestion.nwp_baseline import (
     NWP_DEFAULT_VARIABLES,
