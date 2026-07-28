@@ -9,12 +9,16 @@ METAR  : Fetches only the 3 stations that returned 0 rows the first time
          (VTUB, VTUN, VTBP). Merges into the existing metar_thai.parquet
          and re-uploads to HF. Logs per-station/per-year diagnostics so
          the root cause of each failure is visible (not swallowed).
-NWP    : Skipped — empty baseline, not required for training.
+NWP    : Downloads the full GFS physics variable set (17 variables including
+         CAPE, 850/500 hPa winds, precipitable water, soil moisture) at all
+         16 METAR station locations for 2016–2022. Saves as nwp_features.parquet.
+         This is the PRIMARY model input for the GFS-correction architecture.
+         Per-station checkpoints mean partial runs resume cleanly.
 
 Usage
 -----
-    # Both phases (default):
-    python scripts/augment_data.py
+    # NWP features only (primary new data for production model):
+    python scripts/augment_data.py --nwp-only
 
     # ERA5 continuation only (what the cron runs):
     python scripts/augment_data.py --era5-only
@@ -22,8 +26,11 @@ Usage
     # METAR missing-station fill only:
     python scripts/augment_data.py --metar-only
 
-    # Dry-run METAR diagnostics without pushing:
-    python scripts/augment_data.py --metar-only --skip-push
+    # All phases:
+    python scripts/augment_data.py
+
+    # Dry-run without pushing to HF:
+    python scripts/augment_data.py --nwp-only --skip-push
 """
 from __future__ import annotations
 
@@ -291,6 +298,124 @@ def continue_era5(
 
 
 # ---------------------------------------------------------------------------
+# NWP features download (GFS-correction model — primary training input)
+# ---------------------------------------------------------------------------
+
+def download_nwp_features(
+    cfg: dict,
+    start: str,
+    end: str,
+    repo_id: str | None,
+    token: str | None,
+    skip_push: bool,
+) -> None:
+    """Download full GFS physics variable set at all METAR station locations.
+
+    This is a one-shot download (not cron-based): 16 stations × ~60k rows each
+    = ~960k rows total. Should complete in a single GitHub Actions run in ~30-60
+    minutes. Per-station checkpoints mean it resumes cleanly on failure.
+
+    Output: data/raw/nwp_features.parquet → pushed to HF as nwp_features.parquet
+    """
+    from src.ingestion.metar import STATION_COORDS
+    from src.ingestion.nwp_baseline import fetch_all_stations
+
+    # The historical forecast API is only available from 2016-01-01.
+    nwp_min = cfg.get("nwp_min_start", "2016-01-01")
+    effective_start = start if start >= nwp_min else nwp_min
+    if effective_start != start:
+        logger.info(f"NWP-FEAT | clamping start {start} → {effective_start} (API limit)")
+
+    variables = cfg.get("nwp_variables", None)  # None → use NWP_DEFAULT_VARIABLES
+
+    outdir = Path("data/raw")
+    outdir.mkdir(parents=True, exist_ok=True)
+    checkpoint_dir = outdir / ".nwp_checkpoint"
+
+    # Pull existing per-station checkpoint files from HF so re-runs on ephemeral
+    # GitHub Actions runners don't re-download already-completed stations.
+    if repo_id and token:
+        _pull_nwp_checkpoints_from_hf(checkpoint_dir, repo_id, token)
+
+    logger.info(
+        f"NWP-FEAT | fetching {len(STATION_COORDS)} stations, "
+        f"{effective_start} → {end}, "
+        f"{len(variables) if variables else 'default'} variables"
+    )
+
+    try:
+        nwp_df = fetch_all_stations(
+            STATION_COORDS, effective_start, end,
+            variables=variables,
+            checkpoint_dir=checkpoint_dir,
+        )
+    finally:
+        # Push checkpoint files to HF even on partial failure.
+        if repo_id and token:
+            _push_nwp_checkpoints_to_hf(checkpoint_dir, repo_id, token)
+
+    out_path = outdir / "nwp_features.parquet"
+    nwp_df.to_parquet(out_path, index=False)
+    logger.info(f"NWP-FEAT | {len(nwp_df):,} rows → {out_path}")
+
+    if not skip_push:
+        push_to_hf(out_path, repo_id, token)
+        logger.info("NWP-FEAT | nwp_features.parquet pushed to HF ✓")
+    else:
+        logger.info(f"NWP-FEAT | skip-push: parquet at {out_path}")
+
+
+def _pull_nwp_checkpoints_from_hf(checkpoint_dir: Path, repo_id: str, token: str) -> None:
+    """Pull per-station NWP checkpoint parquets from HF to resume partial downloads."""
+    from src.ingestion.metar import THAI_METAR_STATIONS
+
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    pulled = 0
+    for station in THAI_METAR_STATIONS:
+        local = checkpoint_dir / f"{station}.parquet"
+        if local.exists():
+            continue
+        try:
+            hf_hub_download(
+                repo_id=repo_id,
+                filename=f"nwp_checkpoints/{station}.parquet",
+                repo_type="dataset",
+                token=token,
+                local_dir=str(checkpoint_dir),
+            )
+            # hf_hub_download creates subdirectory structure; move to flat dir
+            nested = checkpoint_dir / "nwp_checkpoints" / f"{station}.parquet"
+            if nested.exists():
+                nested.rename(local)
+            pulled += 1
+        except Exception:
+            pass  # Not yet on HF — station will be downloaded fresh
+    if pulled:
+        logger.info(f"NWP-FEAT | restored {pulled} station checkpoints from HF")
+
+
+def _push_nwp_checkpoints_to_hf(checkpoint_dir: Path, repo_id: str, token: str) -> None:
+    """Push per-station checkpoint parquets to HF so next run can resume."""
+    from huggingface_hub import HfApi
+    api = HfApi()
+    pushed = 0
+    for ckpt in sorted(checkpoint_dir.glob("*.parquet")):
+        try:
+            api.upload_file(
+                path_or_fileobj=str(ckpt),
+                path_in_repo=f"nwp_checkpoints/{ckpt.name}",
+                repo_id=repo_id,
+                repo_type="dataset",
+                token=token,
+            )
+            pushed += 1
+        except Exception as exc:
+            logger.warning(f"NWP-FEAT | could not push checkpoint {ckpt.name}: {exc}")
+    if pushed:
+        logger.info(f"NWP-FEAT | pushed {pushed} station checkpoints to HF")
+
+
+# ---------------------------------------------------------------------------
 # HuggingFace push
 # ---------------------------------------------------------------------------
 
@@ -317,8 +442,14 @@ def main() -> None:
     parser.add_argument("--end", default=None)
     parser.add_argument("--era5-only", action="store_true", help="Only run ERA5 continuation")
     parser.add_argument("--metar-only", action="store_true", help="Only run METAR missing-station fill")
+    parser.add_argument("--nwp-only", action="store_true", help="Only run NWP features download")
     parser.add_argument("--skip-push", action="store_true", help="Skip HuggingFace upload (local run)")
     args = parser.parse_args()
+
+    # Validate mutual exclusivity of --*-only flags
+    only_flags = [args.era5_only, args.metar_only, args.nwp_only]
+    if sum(only_flags) > 1:
+        raise ValueError("Only one --*-only flag may be set at a time")
 
     token = os.environ.get("HF_TOKEN")
     if not token and not args.skip_push:
@@ -342,8 +473,13 @@ def main() -> None:
     else:
         repo_id = None
 
-    run_era5 = not args.metar_only
-    run_metar = not args.era5_only
+    run_nwp = args.nwp_only or not (args.era5_only or args.metar_only)
+    run_era5 = args.era5_only or not (args.nwp_only or args.metar_only)
+    run_metar = args.metar_only or not (args.nwp_only or args.era5_only)
+
+    if run_nwp:
+        logger.info("═══ NWP features download (GFS physics variables) ═══")
+        download_nwp_features(cfg, start, end, repo_id, token, args.skip_push)
 
     if run_era5:
         logger.info("═══ ERA5 continuation (checkpoint-aware) ═══")
