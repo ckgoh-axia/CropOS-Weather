@@ -1,7 +1,7 @@
-name: ERA5 Resume (cron every 2h)
+name: ERA5 Resume (cron every 1h)
 on:
   schedule:
-    - cron: "0 */2 * * *"
+    - cron: "0 * * * *"
   workflow_dispatch:
 jobs:
   era5-resume:
