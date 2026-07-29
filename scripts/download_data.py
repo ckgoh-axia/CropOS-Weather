@@ -36,10 +36,11 @@ HF_DATASET_REPO_NAME = "cropos-data"
 # and under era5_batches/ in the HF dataset repo.  This avoids loading all
 # previously-downloaded ERA5 rows into memory on every new batch write.
 
-# Maximum new batches per cron run.  At 65 s/batch, 4 batches ≈ 5 minutes.
-# Stopping here guarantees a clean shutdown before the rate-limit window
-# closes, so the per-batch checkpoint files are always pushed to HF.
-_ERA5_MAX_BATCHES_PER_RUN = 4
+# Maximum new batches per cron run.  At 65 s/batch, 30 batches ≈ 32 minutes.
+# OOM was the real failure mode (not rate limit); with per-batch checkpoint
+# files that risk is gone.  30 batches at 0.9 req/min stays under the
+# archive-api 2 req/min free-tier limit.
+_ERA5_MAX_BATCHES_PER_RUN = 30
 
 
 def _pull_era5_checkpoint_from_hf(checkpoint_dir: Path, repo_id: str, token: str) -> None:
