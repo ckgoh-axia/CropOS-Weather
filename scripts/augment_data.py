@@ -277,7 +277,10 @@ def continue_era5(
 
     Pulls the ERA5 checkpoint from HF (so this runner picks up exactly where
     the last run stopped), downloads the next ~4 batches until the hourly
-    limit is hit, then pushes the updated checkpoint and final parquet back.
+    limit is hit, then pushes the updated checkpoint back.
+
+    Returns without writing or pushing the final parquet on partial runs —
+    that assembly only happens on the run where all 198 batches complete.
     """
     from scripts.download_data import download_era5, push_to_hf
 
@@ -290,11 +293,18 @@ def continue_era5(
         hf_token=token if not skip_push else None,
     )
 
+    if era5_path is None:
+        # Partial run — checkpoints already pushed to HF inside download_era5.
+        # Exit cleanly so GitHub Actions marks the run green.
+        logger.info("ERA5-AUG | partial run — checkpoints on HF, no final parquet yet")
+        return
+
+    # All 198 batches complete — push the assembled final parquet.
     if not skip_push:
         push_to_hf(era5_path, repo_id, token)
-        logger.info("ERA5-AUG | final parquet pushed to HF ✓")
+        logger.info("ERA5-AUG | all batches done — final parquet pushed to HF ✓")
     else:
-        logger.info(f"ERA5-AUG | skip-push: parquet at {era5_path}")
+        logger.info(f"ERA5-AUG | skip-push: final parquet at {era5_path}")
 
 
 # ---------------------------------------------------------------------------

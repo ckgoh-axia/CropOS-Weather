@@ -36,10 +36,9 @@ HF_DATASET_REPO_NAME = "cropos-data"
 # and under era5_batches/ in the HF dataset repo.  This avoids loading all
 # previously-downloaded ERA5 rows into memory on every new batch write.
 
-# Maximum new batches per cron run.  At 65 s/batch, 30 batches ≈ 32 minutes.
-# OOM was the real failure mode (not rate limit); with per-batch checkpoint
-# files that risk is gone.  30 batches at 0.9 req/min stays under the
-# archive-api 2 req/min free-tier limit.
+# Per-run batch cap — the Open-Meteo archive API allows ~4 batches per
+# rate-limit window regardless of inter-batch delay.  Setting a higher cap
+# is harmless: the API exception is caught and the loop breaks cleanly.
 _ERA5_MAX_BATCHES_PER_RUN = 30
 
 
@@ -129,8 +128,14 @@ def download_era5(
     outdir: Path,
     repo_id: str | None = None,
     hf_token: str | None = None,
-) -> Path:
-    from src.ingestion.era5 import build_thailand_grid, fetch_era5_grid
+) -> Path | None:
+    """Download ERA5 grid, returning the parquet path when complete or None on partial runs.
+
+    Returns None (instead of raising) when the run ends before all batches are done —
+    e.g. because the Open-Meteo hourly rate limit was hit.  The HF checkpoint is
+    always pushed in the finally block so the next cron run resumes from here.
+    """
+    from src.ingestion.era5 import Era5PartialDownload, build_thailand_grid, fetch_era5_grid
 
     checkpoint_dir = outdir / ".era5_checkpoint"
 
@@ -146,15 +151,24 @@ def download_era5(
     # the NEW ones afterwards.
     pre_existing = set(checkpoint_dir.glob("batch_*.parquet")) if checkpoint_dir.exists() else set()
 
+    era5_df = None
+    partial = False
     try:
         era5_df = fetch_era5_grid(
             lat_pts, lon_pts, start, end,
             checkpoint_dir=checkpoint_dir,
             max_new_batches=_ERA5_MAX_BATCHES_PER_RUN,
         )
+    except Era5PartialDownload as exc:
+        # Not an error — the run hit the rate limit or max_new_batches cap.
+        # Checkpoints for completed batches are already on disk; the finally
+        # block below pushes them to HF.  We return None to tell the caller
+        # to skip the (OOM-risky) final parquet assembly.
+        logger.info(f"ERA5 | {exc}")
+        partial = True
     finally:
-        # Push newly downloaded batch files to HF.  This runs even if
-        # fetch_era5_grid raises (e.g. all batches failed on a fresh runner).
+        # Push newly downloaded batch files to HF.  This runs even on partial
+        # runs and even if fetch_era5_grid raises an unexpected exception.
         # Pushing only the new files keeps HF commit history clean.
         if repo_id and hf_token:
             new_batches = sorted(
@@ -174,6 +188,10 @@ def download_era5(
                     )
             else:
                 logger.info("ERA5 | no new batch files this run (all skipped or failed)")
+
+    if partial:
+        logger.info("ERA5 | partial run complete — exiting cleanly, no final parquet written")
+        return None
 
     path = outdir / "era5_thailand.parquet"
     era5_df.to_parquet(path, index=False)

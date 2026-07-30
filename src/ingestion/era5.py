@@ -16,6 +16,8 @@ With per-batch files:
   - Peak RAM per batch ≈ one_batch_size (~28 MB) instead of O(all_rows).
   - HF push targets only the new batch files written this run.
   - max_new_batches stops the loop cleanly before the rate-limit window closes.
+  - Era5PartialDownload is raised (not RuntimeError) when the run ends before
+    all batches are done — callers skip the final assembly to avoid OOM.
 """
 from __future__ import annotations
 
@@ -31,6 +33,16 @@ import requests_cache
 from retry_requests import retry
 
 logger = logging.getLogger(__name__)
+
+
+class Era5PartialDownload(RuntimeError):
+    """Raised by fetch_era5_grid when the run ends before all batches are done.
+
+    This is not an error — checkpoints for completed batches have been saved.
+    Callers should skip the expensive final-assembly step and exit cleanly so
+    the next cron run can resume from the checkpoint without OOM risk.
+    """
+
 
 ERA5_VARIABLES = [
     "temperature_2m", "dewpoint_2m", "relativehumidity_2m",
@@ -180,14 +192,27 @@ def fetch_era5_grid(
             time.sleep(BATCH_DELAY_S)
 
     # -----------------------------------------------------------------------
-    # Assemble final result
+    # Assemble final result — only when ALL batches are complete.
     # -----------------------------------------------------------------------
     if use_checkpoint:
         batch_files = sorted(checkpoint_dir.glob("batch_*.parquet"))
         if not batch_files:
             raise RuntimeError("ERA5: all batches failed — no data collected")
-        # Reading all batch files here is the only full-dataset load per run.
-        # Peak RAM = total_checkpoint_size, which is bounded and predictable.
+        done_count = len(batch_files)
+        if done_count < n_batches:
+            # Not all batches are done.  Raise Era5PartialDownload instead of
+            # attempting a partial concat — reading 80-190 batch files into memory
+            # in a single pd.concat can exceed the 7 GB GitHub Actions RAM limit.
+            # The caller's finally block will push the new checkpoint files to HF
+            # and then exit cleanly (exit code 0, green run).
+            raise Era5PartialDownload(
+                f"ERA5: {done_count}/{n_batches} batches done — "
+                f"checkpoint saved, re-run to continue"
+            )
+        # All batches complete — assemble the full dataset once.
+        # Peak RAM here = total checkpoint size (~28 MB × n_batches ≈ 5.5 GB),
+        # but this only runs on the final run, not on every intermediate cron run.
+        logger.info(f"ERA5 | all {n_batches} batches complete — assembling final dataset")
         result = pd.concat(
             [pd.read_parquet(f) for f in batch_files],
             ignore_index=True,
