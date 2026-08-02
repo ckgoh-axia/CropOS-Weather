@@ -1,0 +1,38 @@
+name: ERA5 Top-up (download missing northern grid)
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: "ERA5 start date (YYYY-MM-DD)"
+        required: false
+        default: "2015-01-01"
+      end_date:
+        description: "ERA5 end date (YYYY-MM-DD)"
+        required: false
+        default: "2022-12-31"
+
+jobs:
+  era5-topup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          pip install \
+            openmeteo-requests requests-cache retry-requests \
+            pandas numpy pyarrow pyyaml \
+            huggingface-hub
+      - name: Download missing ERA5 grid points → era5_north.parquet
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          python scripts/augment_data.py \
+            --era5-topup \
+            --start "${{ github.event.inputs.start_date }}" \
+            --end   "${{ github.event.inputs.end_date }}"

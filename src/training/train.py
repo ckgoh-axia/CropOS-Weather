@@ -73,6 +73,12 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
                 f"Expected one of: {nwp_candidates}"
             )
 
+        # Include northern ERA5 top-up if present (adds grid points for Bangkok, north Thailand)
+        era5_north = data_dir / "era5_north.parquet"
+        era5_north_path = era5_north if era5_north.exists() else None
+        if era5_north_path:
+            logger.info(f"Found era5_north.parquet — northern grid will be merged")
+
         train_ds = load_dataset_from_parquets(
             era5_path=data_dir / "era5_thailand.parquet",
             nwp_path=nwp_path,
@@ -83,6 +89,7 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
             era5_node_radius_km=era5_node_radius_km,
             horizons_h=horizons_h,
             threshold_mm=threshold_mm,
+            era5_north_path=era5_north_path,
         )
         val_ds = load_dataset_from_parquets(
             era5_path=data_dir / "era5_thailand.parquet",
@@ -94,6 +101,7 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
             era5_node_radius_km=era5_node_radius_km,
             horizons_h=horizons_h,
             threshold_mm=threshold_mm,
+            era5_north_path=era5_north_path,
         )
     else:
         hf_token = os.environ.get("HF_TOKEN")

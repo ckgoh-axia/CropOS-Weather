@@ -368,19 +368,22 @@ def load_dataset_from_parquets(
     era5_node_radius_km: float = 100.0,
     horizons_h: List[int] | None = None,
     threshold_mm: float = 1.0,
+    era5_north_path: str | Path | None = None,
 ) -> CropOSDataset:
     """Build a CropOSDataset from on-disk or HuggingFace-cached parquet files.
 
     Args:
-        era5_path:   Path to era5_thailand.parquet.
-        nwp_path:    Path to nwp_features.parquet.
-        station_order: Ordered list of METAR station IDs.
-        station_coords: {station_id: (lat, lon)}.
-        start_date:  Clip to timestamps >= start_date (ISO format, UTC).
-        end_date:    Clip to timestamps <= end_date (ISO format, UTC).
+        era5_path:       Path to era5_thailand.parquet (southern/existing grid).
+        nwp_path:        Path to nwp_features.parquet.
+        station_order:   Ordered list of METAR station IDs.
+        station_coords:  {station_id: (lat, lon)}.
+        start_date:      Clip to timestamps >= start_date (ISO format, UTC).
+        end_date:        Clip to timestamps <= end_date (ISO format, UTC).
         era5_node_radius_km: ERA5 spatial filtering radius (default 100 km).
-        horizons_h:  Forecast horizons in hours.
-        threshold_mm: Rain/no-rain threshold.
+        horizons_h:      Forecast horizons in hours.
+        threshold_mm:    Rain/no-rain threshold.
+        era5_north_path: Optional path to era5_north.parquet (northern grid top-up).
+                         If provided, concatenated with era5_path before filtering.
 
     Returns:
         Constructed CropOSDataset ready for DataLoader.
@@ -392,7 +395,24 @@ def load_dataset_from_parquets(
         era5_df = era5_df[era5_df["timestamp"] >= pd.Timestamp(start_date, tz="UTC")]
     if end_date:
         era5_df = era5_df[era5_df["timestamp"] <= pd.Timestamp(end_date, tz="UTC")]
-    logger.info(f"ERA5: {len(era5_df):,} rows, {era5_df['timestamp'].nunique():,} timestamps")
+
+    # Merge northern top-up if available (adds grid points for Bangkok, Chiang Mai, etc.)
+    if era5_north_path is not None and Path(era5_north_path).exists():
+        logger.info(f"Loading ERA5 north top-up from {era5_north_path}...")
+        north_df = pd.read_parquet(era5_north_path)
+        north_df["timestamp"] = pd.to_datetime(north_df["timestamp"], utc=True)
+        if start_date:
+            north_df = north_df[north_df["timestamp"] >= pd.Timestamp(start_date, tz="UTC")]
+        if end_date:
+            north_df = north_df[north_df["timestamp"] <= pd.Timestamp(end_date, tz="UTC")]
+        era5_df = pd.concat([era5_df, north_df], ignore_index=True)
+        del north_df
+        logger.info(
+            f"ERA5 (south + north): {len(era5_df):,} rows, "
+            f"{era5_df[['lat','lon']].drop_duplicates().__len__()} unique grid points"
+        )
+    else:
+        logger.info(f"ERA5: {len(era5_df):,} rows, {era5_df['timestamp'].nunique():,} timestamps")
 
     logger.info(f"Loading NWP from {nwp_path}...")
     nwp_df = pd.read_parquet(nwp_path)
@@ -448,6 +468,14 @@ def load_dataset_from_hf(
 
     era5_path = _dl("era5_thailand.parquet")
 
+    # Download northern top-up if it exists on HF (grid points above ~12°N)
+    era5_north_path: Path | None = None
+    try:
+        era5_north_path = _dl("era5_north.parquet")
+        logger.info("Found era5_north.parquet on HF — northern grid top-up will be merged")
+    except Exception:
+        logger.info("era5_north.parquet not on HF yet — using southern grid only")
+
     # Try the 22-var NWP features file first; fall back to the legacy baseline.
     try:
         nwp_path = _dl("nwp_features.parquet")
@@ -466,4 +494,5 @@ def load_dataset_from_hf(
         era5_node_radius_km=era5_node_radius_km,
         horizons_h=horizons_h,
         threshold_mm=threshold_mm,
+        era5_north_path=era5_north_path,
     )

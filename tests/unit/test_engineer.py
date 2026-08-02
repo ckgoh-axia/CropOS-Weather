@@ -195,12 +195,20 @@ def test_derived_features_count():
     assert len(DERIVED_NWP_FEATURES) == 6
 
 
-def test_derived_features_dewpoint_depression_sign():
-    """nwp_dd = T2m − Td2m; should be ≥ 0 when T ≥ Td (physical constraint)."""
+def test_derived_features_dewpoint_depression_formula():
+    """nwp_dd = T2m − Td2m — verify the formula, not a physical constraint."""
     df = _make_full_nwp_df()
     out = add_derived_nwp_features(df)
-    # Temperature always >= dewpoint in our synthetic fixture (25-35 vs 18-28)
-    assert (out["nwp_dd"] >= -0.1).all(), "Dewpoint depression should be non-negative"
+    expected = (df["nwp_temperature_2m"] - df["nwp_dewpoint_2m"]).astype(np.float32)
+    # Reindex expected to match output sort order (station, timestamp)
+    out_sorted = out.reset_index(drop=True)
+    expected_aligned = expected.reindex(
+        df.sort_values(["station", "timestamp"]).index
+    ).reset_index(drop=True)
+    np.testing.assert_allclose(
+        out_sorted["nwp_dd"].values, expected_aligned.values, rtol=1e-5,
+        err_msg="nwp_dd should equal nwp_temperature_2m - nwp_dewpoint_2m"
+    )
 
 
 def test_derived_features_no_cross_station_bleed():
