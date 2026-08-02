@@ -1,6 +1,19 @@
 gnn:
+  # Feature dimensions — must match src/features/engineer.py constants
+  #
+  # era5_in = 11: 7 ERA5 surface vars + 4 temporal (sin/cos hour/doy)
+  #
+  # local_station_in = 39:
+  #   22  raw NWP vars (nwp_* columns from nwp_features.parquet)
+  #    6  derived time-varying (nwp_dp_3h, nwp_dp_6h, nwp_precip_3h_lag,
+  #                              nwp_precip_24h_sum, nwp_dd, nwp_wspd_shear_850_10m)
+  #    2  static continuous (elevation_m, coast_km)
+  #    5  terrain one-hot  (coastal, mountain, plain, urban, valley)
+  #    4  region  one-hot  (central, north, northeast, south)
+  era5_in: 11
+  local_station_in: 39
   hidden_channels: 128
   num_layers: 2
   dropout: 0.1
-  edge_radius_km: 200
   local_station_dropout: 0.4
+  edge_radius_km: 100       # ERA5 node filtering radius for dataset construction

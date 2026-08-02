@@ -37,9 +37,14 @@ class CropOSGNN(nn.Module):
         num_layers: int = 2,
         dropout: float = 0.1,
         local_station_dropout: float = 0.4,
+        local_station_in: int | None = None,
     ):
         super().__init__()
-        local_station_in = len(self.LOCAL_STATION_FEATURES)  # always 5
+        # local_station_in defaults to the legacy 5-feature METAR set so that
+        # existing tests and checkpoints keep working.  Pass local_station_in=22
+        # when using the 22-variable GFS NWP feature set (production default).
+        if local_station_in is None:
+            local_station_in = len(self.LOCAL_STATION_FEATURES)
         self.local_station_dropout = local_station_dropout
 
         self.era5_proj = nn.Linear(era5_in, hidden)
