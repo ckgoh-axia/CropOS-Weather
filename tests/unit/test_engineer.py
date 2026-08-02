@@ -1,9 +1,5 @@
 # tests/unit/test_engineer.py
 """Unit tests for src/features/engineer.py"""
-<<<<<<< ours
-import math
-=======
->>>>>>> theirs
 import tempfile
 from pathlib import Path
 
@@ -31,10 +27,6 @@ from src.features.engineer import (
     prepare_nwp_features,
 )
 
-<<<<<<< ours
-
-=======
->>>>>>> theirs
 # ── fixtures ──────────────────────────────────────────────────────────────────
 
 def _make_era5_df(n_rows: int = 24) -> pd.DataFrame:

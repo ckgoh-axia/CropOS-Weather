@@ -173,12 +173,6 @@ def add_derived_nwp_features(
     # .diff(n) computes row[i] - row[i-n] within each station group.
     pres_col = "nwp_surface_pressure"
     if pres_col in df.columns:
-<<<<<<< ours
-        pres = df.groupby("station", sort=False)[pres_col].transform(
-            lambda x: pd.to_numeric(x, errors="coerce")
-        )
-=======
->>>>>>> theirs
         df["nwp_dp_3h"] = df.groupby("station", sort=False)[pres_col].transform(
             lambda x: pd.to_numeric(x, errors="coerce").diff(3)
         )
@@ -194,12 +188,6 @@ def add_derived_nwp_features(
     # Soil saturation and recent convective history both modulate rain risk.
     prec_col = "nwp_precipitation"
     if prec_col in df.columns:
-<<<<<<< ours
-        prec = df.groupby("station", sort=False)[prec_col].transform(
-            lambda x: pd.to_numeric(x, errors="coerce")
-        )
-=======
->>>>>>> theirs
         # 3 h lag: precipitation at t−3 (not t, to avoid leaking future signal)
         df["nwp_precip_3h_lag"] = df.groupby("station", sort=False)[prec_col].transform(
             lambda x: pd.to_numeric(x, errors="coerce").shift(3)
@@ -469,13 +457,8 @@ class FeatureScaler:
         path = Path(path)
         data = np.load(path, allow_pickle=False)
         scaler = cls()
-<<<<<<< ours
-        scaler._means = {k: float(v) for k, v in zip(data["columns"], data["means"])}
-        scaler._stds  = {k: float(v) for k, v in zip(data["columns"], data["stds"])}
-=======
         scaler._means = {k: float(v) for k, v in zip(data["columns"], data["means"], strict=True)}
         scaler._stds  = {k: float(v) for k, v in zip(data["columns"], data["stds"], strict=True)}
->>>>>>> theirs
         logger.info(f"FeatureScaler loaded ← {path}  ({len(scaler._means)} features)")
         return scaler
 
