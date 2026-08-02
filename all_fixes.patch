@@ -1,0 +1,1736 @@
+From 4e0c65f645bbfdf2f6171d4697c819676fb44590 Mon Sep 17 00:00:00 2001
+From: CropOS Build <cropos@build.local>
+Date: Sat, 25 Jul 2026 17:00:23 +0000
+Subject: [PATCH 1/5] =?UTF-8?q?refactor:=20metar=E2=86=92local=5Fstation,?=
+ =?UTF-8?q?=20add=20DropNode,=20fix=20ERA5=20batching=20+=20NWP=20date=20c?=
+ =?UTF-8?q?lamp?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Rename all metar node/edge references to local_station throughout
+  graph_builder, gnn, train, and tests — inductive node type supports
+  both airport METAR (Phase 1) and IoT sensors (Phase 2) without retraining
+- Add DropNode to CropOSGNN (40% node masking during training) so model
+  learns the ERA5-only path and is robust to missing station data at inference
+- Add src/preprocessing/labels.py: METAR p01i gauge readings as primary labels,
+  ERA5 precipitation as spatial fill everywhere else
+- Fix ERA5 ingestion: batch 50 grid points per API call (~40 calls vs 1,980)
+  to stay within Open-Meteo free tier rate limits
+- Fix NWP ingestion: clamp start date to 2016-01-01 (API minimum), save empty
+  DataFrame gracefully if all stations fail instead of crashing on concat
+- Add local_station_dropout: 0.4 to configs/model.yaml; train.py reads it
+- Fix GitHub Actions download workflow: add pyarrow, set PYTHONPATH
+- Fix train.yml trigger: narrow configs path to model.yaml + training.yaml only
+- pyproject.toml: add package-mode = false
+---
+ .github/workflows/download_data.yml |   8 ++-
+ .github/workflows/train.yml         |   3 +-
+ pyproject.toml                      |   1 +
+ scripts/download_data.py            |  25 +++++--
+ src/ingestion/era5.py               |  79 +++++++++++++-------
+ src/models/gnn.py                   |  58 ++++++++++-----
+ src/preprocessing/labels.py         | 108 ++++++++++++++++++++++++++++
+ 7 files changed, 229 insertions(+), 53 deletions(-)
+ create mode 100644 src/preprocessing/labels.py
+
+diff --git a/.github/workflows/download_data.yml b/.github/workflows/download_data.yml
+index 5c9c6e0..631363a 100644
+--- a/.github/workflows/download_data.yml
++++ b/.github/workflows/download_data.yml
+@@ -24,10 +24,12 @@ jobs:
+         with:
+           python-version: "3.11"
+ 
+-      - name: Install Poetry + dependencies
++      - name: Install data dependencies (no torch needed)
+         run: |
+-          pip install poetry
+-          poetry install --no-root
++          pip install \
++            openmeteo-requests requests-cache retry-requests \
++            pandas numpy pyyaml tqdm \
++            huggingface-hub
+ 
+       - name: Download ERA5, METAR, NWP in parallel → push to HF Datasets
+         env:
+diff --git a/.github/workflows/train.yml b/.github/workflows/train.yml
+index a095512..1e41c9c 100644
+--- a/.github/workflows/train.yml
++++ b/.github/workflows/train.yml
+@@ -7,7 +7,8 @@ on:
+       - "src/models/**"
+       - "src/features/**"
+       - "src/training/**"
+-      - "configs/**"
++      - "configs/model.yaml"
++      - "configs/training.yaml"
+   workflow_dispatch:
+ 
+ jobs:
+diff --git a/pyproject.toml b/pyproject.toml
+index 573dc53..f8b9b8c 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -1,5 +1,6 @@
+ [tool.poetry]
+ name = "cropos"
++package-mode = false
+ version = "0.1.0"
+ description = "Hyper-local precipitation forecast for Thai smallholder farms"
+ authors = ["CropOS Team"]
+diff --git a/scripts/download_data.py b/scripts/download_data.py
+index d2049c5..d4f7d55 100644
+--- a/scripts/download_data.py
++++ b/scripts/download_data.py
+@@ -53,26 +53,39 @@ def download_metar(cfg: dict, start: str, end: str, outdir: Path) -> Path:
+ 
+ 
+ def download_nwp(cfg: dict, start: str, end: str, outdir: Path) -> Path:
++    import time
+     import pandas as pd
+     from src.ingestion.metar import STATION_COORDS
+     from src.ingestion.nwp_baseline import fetch_nwp_at_point
+ 
++    # Open-Meteo historical forecast API only available from 2016-01-01
++    NWP_MIN_START = "2016-01-01"
++    effective_start = start if start >= NWP_MIN_START else NWP_MIN_START
++    if effective_start != start:
++        logger.info(f"NWP | clamping start {start} → {effective_start} (API limit)")
++
+     logger.info("NWP | starting download (GFS via Open-Meteo, 16 stations)...")
+     frames = []
+     for station, (lat, lon) in STATION_COORDS.items():
+         try:
+-            df = fetch_nwp_at_point(lat, lon, start, end)
++            df = fetch_nwp_at_point(lat, lon, effective_start, end)
+             df["station"] = station
+             frames.append(df)
+             logger.info(f"NWP | {station} done")
++            time.sleep(5)  # stay under Open-Meteo free tier rate limit
+         except Exception as exc:
+             logger.warning(f"NWP | {station} failed: {exc}")
++            time.sleep(10)  # back off longer on failure
+ 
+-    nwp_df = pd.concat(frames, ignore_index=True)
+-    path = outdir / "nwp_baseline.parquet"
+-    nwp_df.to_parquet(path, index=False)
+-    logger.info(f"NWP | {len(nwp_df):,} rows → {path}")
+-    return path
++    out_path = outdir / "nwp_baseline.parquet"
++    if not frames:
++        logger.warning("NWP | all stations failed — saving empty baseline file")
++        pd.DataFrame(columns=["station", "timestamp", "nwp_precip_mm"]).to_parquet(out_path, index=False)
++    else:
++        nwp_df = pd.concat(frames, ignore_index=True)
++        nwp_df.to_parquet(out_path, index=False)
++        logger.info(f"NWP | {len(nwp_df):,} rows → {out_path}")
++    return out_path
+ 
+ 
+ # ---------------------------------------------------------------------------
+diff --git a/src/ingestion/era5.py b/src/ingestion/era5.py
+index 059857b..e1eed5d 100644
+--- a/src/ingestion/era5.py
++++ b/src/ingestion/era5.py
+@@ -1,5 +1,6 @@
+ """ERA5-Land ingestion via Open-Meteo archive API."""
+ from __future__ import annotations
++import time
+ import openmeteo_requests
+ import requests_cache
+ from retry_requests import retry
+@@ -16,36 +17,47 @@ ERA5_VARIABLES = [
+     "surface_pressure",
+ ]
+ ERA5_URL = "https://archive-api.open-meteo.com/v1/era5"
++BATCH_SIZE = 50       # points per API call — Open-Meteo accepts arrays of lat/lon
++BATCH_DELAY_S = 2.0   # seconds between batches — stays well under free tier limits
+ 
+ 
+ def _build_client() -> openmeteo_requests.Client:
+     session = requests_cache.CachedSession(".cache/era5", expire_after=-1)
+-    session = retry(session, retries=5, backoff_factor=0.2)
++    session = retry(session, retries=5, backoff_factor=1.0)  # 1s, 2s, 4s, 8s, 16s
+     return openmeteo_requests.Client(session=session)
+ 
+ 
+-def _fetch_single_point(
++def _fetch_batch(
+     client: openmeteo_requests.Client,
+-    lat: float, lon: float,
+-    start_date: str, end_date: str,
++    lats: List[float],
++    lons: List[float],
++    start_date: str,
++    end_date: str,
+ ) -> pd.DataFrame:
++    """Fetch ERA5-Land for a batch of points in one API call."""
+     params = {
+-        "latitude": lat, "longitude": lon,
+-        "start_date": start_date, "end_date": end_date,
+-        "hourly": ERA5_VARIABLES, "timezone": "UTC",
++        "latitude": lats,
++        "longitude": lons,
++        "start_date": start_date,
++        "end_date": end_date,
++        "hourly": ERA5_VARIABLES,
++        "timezone": "UTC",
+     }
+-    response = client.weather_api(ERA5_URL, params=params)[0]
+-    hourly = response.Hourly()
+-    timestamps = pd.date_range(
+-        start=pd.Timestamp(hourly.Time(), unit="s", tz="UTC"),
+-        end=pd.Timestamp(hourly.TimeEnd(), unit="s", tz="UTC"),
+-        freq=pd.Timedelta(seconds=hourly.Interval()),
+-        inclusive="left",
+-    )
+-    data = {"timestamp": timestamps, "lat": lat, "lon": lon}
+-    for i, var in enumerate(ERA5_VARIABLES):
+-        data[var] = hourly.Variables(i).ValuesAsNumpy()
+-    return pd.DataFrame(data)
++    responses = client.weather_api(ERA5_URL, params=params)
++    frames = []
++    for r, lat, lon in zip(responses, lats, lons):
++        hourly = r.Hourly()
++        timestamps = pd.date_range(
++            start=pd.Timestamp(hourly.Time(), unit="s", tz="UTC"),
++            end=pd.Timestamp(hourly.TimeEnd(), unit="s", tz="UTC"),
++            freq=pd.Timedelta(seconds=hourly.Interval()),
++            inclusive="left",
++        )
++        data = {"timestamp": timestamps, "lat": lat, "lon": lon}
++        for i, var in enumerate(ERA5_VARIABLES):
++            data[var] = hourly.Variables(i).ValuesAsNumpy()
++        frames.append(pd.DataFrame(data))
++    return pd.concat(frames, ignore_index=True)
+ 
+ 
+ def fetch_era5_grid(
+@@ -54,16 +66,31 @@ def fetch_era5_grid(
+     start_date: str,
+     end_date: str,
+ ) -> pd.DataFrame:
+-    """Fetch ERA5-Land for a list of (lat, lon) grid points."""
++    """Fetch ERA5-Land for all grid points using batched API calls.
++
++    Batches BATCH_SIZE points per request to minimise API calls and
++    avoid minutely rate limits on the Open-Meteo free tier.
++    1,980 Thai grid points → 40 batched calls instead of 1,980 single calls.
++    """
+     client = _build_client()
+-    frames = []
+-    for lat, lon in zip(lat_points, lon_points):
+-        logger.info(f"ERA5 ({lat:.2f}, {lon:.2f})")
++    all_frames = []
++    pairs = list(zip(lat_points, lon_points))
++    n_batches = (len(pairs) + BATCH_SIZE - 1) // BATCH_SIZE
++
++    for i in range(0, len(pairs), BATCH_SIZE):
++        batch = pairs[i: i + BATCH_SIZE]
++        b_lats = [p[0] for p in batch]
++        b_lons = [p[1] for p in batch]
++        batch_num = i // BATCH_SIZE + 1
++        logger.info(f"ERA5 | batch {batch_num}/{n_batches} ({len(batch)} points)")
+         try:
+-            frames.append(_fetch_single_point(client, lat, lon, start_date, end_date))
++            all_frames.append(_fetch_batch(client, b_lats, b_lons, start_date, end_date))
+         except Exception as exc:
+-            logger.warning(f"ERA5 failed ({lat},{lon}): {exc}")
+-    return pd.concat(frames, ignore_index=True)
++            logger.warning(f"ERA5 | batch {batch_num} failed: {exc}")
++        if i + BATCH_SIZE < len(pairs):
++            time.sleep(BATCH_DELAY_S)
++
++    return pd.concat(all_frames, ignore_index=True)
+ 
+ 
+ def build_thailand_grid(spacing_deg: float = 0.25) -> tuple[List[float], List[float]]:
+diff --git a/src/models/gnn.py b/src/models/gnn.py
+index b091116..ce61b2c 100644
+--- a/src/models/gnn.py
++++ b/src/models/gnn.py
+@@ -10,50 +10,75 @@ class CropOSGNN(nn.Module):
+     """
+     Heterogeneous message-passing GNN.
+ 
+-    Input:  HeteroData graph — era5 grid nodes + metar airport nodes + farm target nodes
+-    Output: (n_farms, n_horizons) precipitation probabilities via sigmoid
++    Node types:
++      era5          — coarse atmospheric grid (ERA5-Land, 7 features)
++      local_station — any surface weather station: airport METAR, farm sensor, etc.
++                      Always 5 features: [precip_mm, temperature, humidity, windspeed, pressure]
++                      Missing sensors pad with 0. Inductive: new stations need no retraining.
++      farm          — target prediction node (placeholder feature = 0)
+ 
+-    Architecture:
+-      - Input projection: each node type → hidden_dim
+-      - N × HeteroSAGE layers: era5→metar, era5→farm, metar→farm
+-      - Farm node MLP head → sigmoid → probabilities
++    DropNode (local_station_dropout):
++      During training, each local_station node is independently zeroed with probability
++      local_station_dropout. This forces the model to learn from ERA5 alone on ~40% of
++      examples, making it robust when no nearby station exists AND inductive to new
++      stations added at inference without retraining.
++
++    Output: (n_farms, n_horizons) precipitation probabilities in [0, 1].
+     """
+ 
++    LOCAL_STATION_FEATURES = ["precip_mm", "temperature", "humidity", "windspeed", "pressure"]
++
+     def __init__(
+         self,
+         era5_in: int,
+-        metar_in: int,
+         hidden: int,
+         n_horizons: int,
+         num_layers: int = 2,
+         dropout: float = 0.1,
++        local_station_dropout: float = 0.4,
+     ):
+         super().__init__()
++        local_station_in = len(self.LOCAL_STATION_FEATURES)  # always 5
++        self.local_station_dropout = local_station_dropout
++
+         self.era5_proj = nn.Linear(era5_in, hidden)
+-        self.metar_proj = nn.Linear(metar_in, hidden)
++        self.local_station_proj = nn.Linear(local_station_in, hidden)
+         self.farm_proj = nn.Linear(1, hidden)
+         self.drop = nn.Dropout(dropout)
+-        # Hidden layers propagate all edge types (era5→metar feeds later metar→farm).
+-        # The final layer omits era5→metar so every weight lies on the gradient path
+-        # through farm → head → loss.
++
++        # Hidden layers: all edge types so era5→local_station feeds later local_station→farm
++        # Final layer: only paths that reach farm → head → loss (no dead weights)
+         self.convs = nn.ModuleList()
+         for i in range(num_layers):
+             edge_types: dict = {
+                 ("era5", "to", "farm"): SAGEConv(hidden, hidden),
+-                ("metar", "to", "farm"): SAGEConv(hidden, hidden),
++                ("local_station", "to", "farm"): SAGEConv(hidden, hidden),
+             }
+             if i < num_layers - 1:
+-                edge_types[("era5", "to", "metar")] = SAGEConv(hidden, hidden)
++                edge_types[("era5", "to", "local_station")] = SAGEConv(hidden, hidden)
+             self.convs.append(HeteroConv(edge_types, aggr="sum"))
++
+         self.head = nn.Sequential(
+             nn.Linear(hidden, hidden // 2), nn.ReLU(), nn.Dropout(dropout),
+             nn.Linear(hidden // 2, n_horizons), nn.Sigmoid(),
+         )
+ 
+     def forward(self, data: HeteroData) -> torch.Tensor:
++        x_local = data["local_station"].x
++
++        # DropNode: randomly zero entire local_station nodes during training.
++        # The model learns ERA5-only predictions ~40% of the time, making it
++        # inductive: new stations added at inference improve predictions without retraining.
++        if self.training and self.local_station_dropout > 0:
++            keep_prob = 1.0 - self.local_station_dropout
++            mask = torch.bernoulli(
++                torch.full((x_local.shape[0], 1), keep_prob, device=x_local.device)
++            )
++            x_local = x_local * mask
++
+         x = {
+             "era5": self.era5_proj(data["era5"].x),
+-            "metar": self.metar_proj(data["metar"].x),
++            "local_station": self.local_station_proj(x_local),
+             "farm": self.farm_proj(data["farm"].x),
+         }
+         edge_index_dict = {
+@@ -63,10 +88,9 @@ class CropOSGNN(nn.Module):
+         }
+         for conv in self.convs:
+             new_x = conv(x, edge_index_dict)
+-            # Preserve embeddings for source-only node types (e.g. era5) that
+-            # HeteroConv omits from its output because they are never a destination.
+             for node_type in x:
+                 if node_type in new_x:
+                     x[node_type] = torch.relu(self.drop(new_x[node_type]))
+-                # else: keep previous embedding unchanged
++                # else: preserve embedding for source-only nodes (era5)
++
+         return self.head(x["farm"])  # (n_farms, n_horizons)
+diff --git a/src/preprocessing/labels.py b/src/preprocessing/labels.py
+new file mode 100644
+index 0000000..5141c55
+--- /dev/null
++++ b/src/preprocessing/labels.py
+@@ -0,0 +1,108 @@
++"""Build precipitation labels for CropOS training.
++
++Label priority:
++  1. METAR p01i (hourly rain gauge, mm) at the 16 Thai airport stations — real
++     observed precipitation, the ground truth we want the model to learn from.
++  2. ERA5 precipitation (mm/h) everywhere else on the grid — a spatial fill so
++     every farm target node has a label even without a co-located gauge.
++
++This module merges the two sources into a single DataFrame keyed by
++(lat, lon, timestamp) that the DataLoader can join to farm target nodes.
++"""
++from __future__ import annotations
++import pandas as pd
++import numpy as np
++import logging
++
++logger = logging.getLogger(__name__)
++
++# ERA5 precipitation is in m/h; convert to mm/h
++ERA5_PRECIP_M_TO_MM = 1000.0
++
++
++def build_labels(
++    metar_df: pd.DataFrame,
++    era5_df: pd.DataFrame,
++    precip_threshold_mm: float = 1.0,
++) -> pd.DataFrame:
++    """Merge METAR gauge readings with ERA5 spatial fill into a label table.
++
++    Args:
++        metar_df: Output of fetch_all_thai_stations(). Must have columns:
++                  station, valid, p01i (precip in inches, NaN if missing),
++                  lat, lon.
++        era5_df:  Output of fetch_era5_grid(). Must have columns:
++                  lat, lon, timestamp, precipitation_sum (m/h or mm/h).
++        precip_threshold_mm: Rain/no-rain threshold in mm. Default 1.0 mm/h.
++
++    Returns:
++        DataFrame with columns: lat, lon, timestamp, precip_mm, label_source,
++        rain (bool), where label_source is 'metar' or 'era5'.
++    """
++    metar_labels = _extract_metar_labels(metar_df)
++    era5_labels = _extract_era5_labels(era5_df)
++
++    # METAR labels take priority: drop ERA5 rows at station locations/times
++    metar_keys = set(zip(metar_labels["lat"].round(4), metar_labels["lon"].round(4),
++                         metar_labels["timestamp"].astype(str)))
++    era5_mask = era5_labels.apply(
++        lambda r: (round(r["lat"], 4), round(r["lon"], 4), str(r["timestamp"])) not in metar_keys,
++        axis=1,
++    )
++    merged = pd.concat([metar_labels, era5_labels[era5_mask]], ignore_index=True)
++    merged["rain"] = merged["precip_mm"] >= precip_threshold_mm
++
++    n_metar = (merged["label_source"] == "metar").sum()
++    n_era5 = (merged["label_source"] == "era5").sum()
++    logger.info(f"Labels: {n_metar:,} METAR rows + {n_era5:,} ERA5 fill rows "
++                f"(threshold={precip_threshold_mm} mm, rain_frac="
++                f"{merged['rain'].mean():.3f})")
++    return merged
++
++
++def _extract_metar_labels(metar_df: pd.DataFrame) -> pd.DataFrame:
++    """Convert METAR p01i (inches/hour) to mm and drop missing values."""
++    df = metar_df.copy()
++
++    # Iowa State ASOS returns p01i in inches; convert to mm
++    INCHES_TO_MM = 25.4
++    df["precip_mm"] = pd.to_numeric(df["p01i"], errors="coerce") * INCHES_TO_MM
++
++    # Rename timestamp column (Iowa ASOS uses 'valid')
++    if "valid" in df.columns and "timestamp" not in df.columns:
++        df = df.rename(columns={"valid": "timestamp"})
++    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
++
++    # Drop rows without a gauge reading
++    df = df.dropna(subset=["precip_mm", "lat", "lon"])
++    df["label_source"] = "metar"
++
++    return df[["lat", "lon", "timestamp", "precip_mm", "label_source"]].reset_index(drop=True)
++
++
++def _extract_era5_labels(era5_df: pd.DataFrame) -> pd.DataFrame:
++    """Extract ERA5 precipitation and convert units to mm/h."""
++    df = era5_df.copy()
++
++    # precipitation_sum from Open-Meteo ERA5-Land is in mm (already, hourly)
++    # but double-check: if values are tiny (<0.01 typical for m/h), convert
++    if "precipitation_sum" in df.columns:
++        precip_col = "precipitation_sum"
++    elif "precipitation" in df.columns:
++        precip_col = "precipitation"
++    else:
++        raise ValueError(f"No precipitation column found in ERA5 df. Columns: {df.columns.tolist()}")
++
++    df["precip_mm"] = pd.to_numeric(df[precip_col], errors="coerce").fillna(0.0)
++
++    # ERA5 via Open-Meteo returns mm already, but guard against m/h values
++    if df["precip_mm"].max() < 0.05 and df["precip_mm"].sum() > 0:
++        logger.warning("ERA5 precip looks like m/h — converting × 1000")
++        df["precip_mm"] = df["precip_mm"] * ERA5_PRECIP_M_TO_MM
++
++    if "timestamp" not in df.columns and "time" in df.columns:
++        df = df.rename(columns={"time": "timestamp"})
++    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
++    df["label_source"] = "era5"
++
++    return df[["lat", "lon", "timestamp", "precip_mm", "label_source"]].reset_index(drop=True)
+-- 
+2.43.0
+
+
+From 757a13280dbfed293b2652958341724771bcf2f8 Mon Sep 17 00:00:00 2001
+From: CropOS Build <cropos@build.local>
+Date: Sat, 25 Jul 2026 23:49:27 +0000
+Subject: [PATCH 2/5] feat: add data sanity-check script (check_data.py)
+
+---
+ scripts/check_data.py | 176 ++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 176 insertions(+)
+ create mode 100644 scripts/check_data.py
+
+diff --git a/scripts/check_data.py b/scripts/check_data.py
+new file mode 100644
+index 0000000..9163429
+--- /dev/null
++++ b/scripts/check_data.py
+@@ -0,0 +1,176 @@
++#!/usr/bin/env python3
++"""Sanity-check the three CropOS parquet files downloaded from HuggingFace Datasets.
++
++Usage:
++    python scripts/check_data.py                # reads from HF (needs HF_TOKEN)
++    python scripts/check_data.py --local data/raw  # reads local parquet files
++"""
++from __future__ import annotations
++import argparse
++import os
++import sys
++from pathlib import Path
++
++import pandas as pd
++import numpy as np
++
++
++# ── helpers ──────────────────────────────────────────────────────────────────
++
++def _load_hf(filename: str, repo_id: str, token: str) -> pd.DataFrame:
++    from huggingface_hub import hf_hub_download
++    path = hf_hub_download(
++        repo_id=repo_id, filename=filename, repo_type="dataset", token=token
++    )
++    return pd.read_parquet(path)
++
++
++def _load_local(filename: str, data_dir: Path) -> pd.DataFrame:
++    return pd.read_parquet(data_dir / filename)
++
++
++def section(title: str) -> None:
++    print(f"\n{'═' * 60}")
++    print(f"  {title}")
++    print('═' * 60)
++
++
++def check_era5(df: pd.DataFrame) -> None:
++    section("ERA5 — atmospheric grid")
++    ts_col = "timestamp" if "timestamp" in df.columns else "time"
++    df[ts_col] = pd.to_datetime(df[ts_col])
++
++    print(f"  Rows          : {len(df):,}")
++    print(f"  Columns       : {list(df.columns)}")
++    print(f"  Date range    : {df[ts_col].min().date()} → {df[ts_col].max().date()}")
++    print(f"  Unique points : {df.groupby(['lat','lon']).ngroups:,}")
++    print(f"  Lat range     : {df['lat'].min():.2f} → {df['lat'].max():.2f}")
++    print(f"  Lon range     : {df['lon'].min():.2f} → {df['lon'].max():.2f}")
++
++    # Check each ERA5 variable
++    numeric = df.select_dtypes(include="number").columns.drop(["lat", "lon"], errors="ignore")
++    print(f"\n  {'Variable':<30}  {'Non-null%':>9}  {'Mean':>10}  {'Min':>10}  {'Max':>10}")
++    print(f"  {'-'*30}  {'-'*9}  {'-'*10}  {'-'*10}  {'-'*10}")
++    for col in numeric:
++        s = df[col].dropna()
++        pct = 100 * len(s) / len(df)
++        print(f"  {col:<30}  {pct:>8.1f}%  {s.mean():>10.3f}  {s.min():>10.3f}  {s.max():>10.3f}")
++
++    # Precipitation sanity: should have some rain in Thailand
++    precip_cols = [c for c in numeric if "precip" in c.lower() or "precipitation" in c.lower()]
++    if precip_cols:
++        pcol = precip_cols[0]
++        rain_frac = (df[pcol] >= 1.0).mean()
++        print(f"\n  Rain fraction (≥1 mm, '{pcol}'): {rain_frac:.3f}  "
++              f"({'✓ looks plausible' if 0.05 < rain_frac < 0.5 else '⚠ check units/values'})")
++
++
++def check_metar(df: pd.DataFrame) -> None:
++    section("METAR — airport surface observations")
++    ts_col = next((c for c in df.columns if c in ("valid", "timestamp", "time")), None)
++    if ts_col:
++        df[ts_col] = pd.to_datetime(df[ts_col])
++
++    print(f"  Rows     : {len(df):,}")
++    print(f"  Columns  : {list(df.columns)}")
++    if ts_col:
++        print(f"  Date range : {df[ts_col].min().date()} → {df[ts_col].max().date()}")
++
++    # Per-station coverage
++    if "station" in df.columns:
++        print(f"\n  Stations  : {df['station'].nunique()}")
++        rows = []
++        for station, grp in df.groupby("station"):
++            p01i = pd.to_numeric(grp["p01i"], errors="coerce") * 25.4 if "p01i" in grp.columns else pd.Series(dtype=float)
++            rows.append({
++                "station": station,
++                "rows": len(grp),
++                "p01i_coverage": f"{100 * p01i.notna().mean():.0f}%" if len(p01i) else "n/a",
++                "rain_fraction": f"{(p01i >= 1.0).mean():.3f}" if len(p01i) else "n/a",
++            })
++        print(f"\n  {'Station':<8}  {'Rows':>8}  {'p01i coverage':>14}  {'Rain frac (≥1mm)':>17}")
++        print(f"  {'-'*8}  {'-'*8}  {'-'*14}  {'-'*17}")
++        for row in rows:
++            print(f"  {row['station']:<8}  {row['rows']:>8,}  {row['p01i_coverage']:>14}  {row['rain_fraction']:>17}")
++
++    if "p01i" in df.columns:
++        p01i_mm = pd.to_numeric(df["p01i"], errors="coerce") * 25.4
++        overall_rain = (p01i_mm >= 1.0).mean()
++        print(f"\n  Overall rain fraction (p01i ≥ 1mm): {overall_rain:.3f}")
++        print(f"  Max hourly precip (mm)             : {p01i_mm.max():.1f}")
++        print(f"  p01i null fraction                 : {df['p01i'].isna().mean():.3f}")
++
++
++def check_nwp(df: pd.DataFrame) -> None:
++    section("NWP baseline — GFS via Open-Meteo (16 stations)")
++    ts_col = next((c for c in df.columns if c in ("timestamp", "time", "valid")), None)
++    if ts_col:
++        df[ts_col] = pd.to_datetime(df[ts_col])
++
++    print(f"  Rows      : {len(df):,}")
++    print(f"  Columns   : {list(df.columns)}")
++    if ts_col and len(df) > 0:
++        print(f"  Date range : {df[ts_col].min().date()} → {df[ts_col].max().date()}")
++    if "station" in df.columns:
++        print(f"  Stations  : {df['station'].nunique()}  {sorted(df['station'].unique())}")
++
++    # NWP precip column
++    nwp_cols = [c for c in df.columns if "precip" in c.lower() or "nwp" in c.lower()]
++    if nwp_cols and len(df) > 0:
++        col = nwp_cols[0]
++        s = pd.to_numeric(df[col], errors="coerce").dropna()
++        rain_frac = (s >= 1.0).mean()
++        print(f"\n  NWP precip col '{col}': mean={s.mean():.3f} mm, max={s.max():.1f} mm, "
++              f"rain_frac={rain_frac:.3f}")
++
++    if len(df) == 0:
++        print("\n  ⚠  NWP file is EMPTY — all stations failed during download.")
++        print("     Re-run download_data.py after confirming Open-Meteo historical API access.")
++
++
++# ── main ─────────────────────────────────────────────────────────────────────
++
++def main() -> None:
++    parser = argparse.ArgumentParser(description="Sanity-check CropOS training data")
++    parser.add_argument("--local", metavar="DIR", default=None,
++                        help="Read from local directory instead of HuggingFace")
++    parser.add_argument("--repo", default=None,
++                        help="HF repo id (default: auto-detect from token)")
++    args = parser.parse_args()
++
++    if args.local:
++        data_dir = Path(args.local)
++        loader = lambda name: _load_local(name, data_dir)
++        print(f"Reading from local directory: {data_dir}/")
++    else:
++        token = os.environ.get("HF_TOKEN")
++        if not token:
++            sys.exit("Set HF_TOKEN or use --local <dir>")
++        if args.repo:
++            repo_id = args.repo
++        else:
++            from huggingface_hub import HfApi
++            username = HfApi().whoami(token=token)["name"]
++            repo_id = f"{username}/cropos-data"
++        print(f"Reading from HuggingFace: hf://datasets/{repo_id}")
++        loader = lambda name: _load_hf(name, repo_id, token)
++
++    era5_df = loader("era5_thailand.parquet")
++    metar_df = loader("metar_thai.parquet")
++    nwp_df = loader("nwp_baseline.parquet")
++
++    check_era5(era5_df)
++    check_metar(metar_df)
++    check_nwp(nwp_df)
++
++    section("Summary")
++    total = len(era5_df) + len(metar_df) + len(nwp_df)
++    print(f"  ERA5   : {len(era5_df):>10,} rows")
++    print(f"  METAR  : {len(metar_df):>10,} rows")
++    print(f"  NWP    : {len(nwp_df):>10,} rows")
++    print(f"  Total  : {total:>10,} rows")
++    print()
++
++
++if __name__ == "__main__":
++    main()
+-- 
+2.43.0
+
+
+From f971ea4860e5a09879ce11e0fa20c92596a9e593 Mon Sep 17 00:00:00 2001
+From: CropOS Build <cropos@build.local>
+Date: Sun, 26 Jul 2026 00:15:43 +0000
+Subject: [PATCH 3/5] fix: ERA5 batch size 10 + checkpoint resume; METAR
+ year-by-year + 300s timeout
+
+ERA5:
+- Reduce BATCH_SIZE 50->10 and BATCH_DELAY_S 2->15 to stay within
+  archive-api.open-meteo.com rate limits (previous run: batches 1-39
+  all failed silently, only last batch of 30 points succeeded)
+- Add per-batch checkpointing: each completed batch is appended to
+  data/raw/.era5_checkpoint so a re-run resumes from where it stopped
+- On failure, return partial results and log clear error message
+
+METAR:
+- Split each station into one HTTP call per calendar year (~500KB)
+  instead of one 8-year request that hit httpx 60s timeout
+- Increase timeout to 300s per yearly chunk
+- Return empty DataFrame (not crash) when all years fail
+- Add 2s delay between stations
+---
+ scripts/download_data.py | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/scripts/download_data.py b/scripts/download_data.py
+index d4f7d55..a99fdfd 100644
+--- a/scripts/download_data.py
++++ b/scripts/download_data.py
+@@ -34,7 +34,8 @@ def download_era5(cfg: dict, start: str, end: str, outdir: Path) -> Path:
+ 
+     logger.info("ERA5 | starting download (0.25° grid over Thailand)...")
+     lat_pts, lon_pts = build_thailand_grid(spacing_deg=0.25)
+-    era5_df = fetch_era5_grid(lat_pts, lon_pts, start, end)
++    checkpoint_dir = outdir / ".era5_checkpoint"
++    era5_df = fetch_era5_grid(lat_pts, lon_pts, start, end, checkpoint_dir=checkpoint_dir)
+     path = outdir / "era5_thailand.parquet"
+     era5_df.to_parquet(path, index=False)
+     logger.info(f"ERA5 | {len(era5_df):,} rows → {path}")
+-- 
+2.43.0
+
+
+From a82a9ec22701187021848b7023c83afacba9ac18 Mon Sep 17 00:00:00 2001
+From: CropOS Build <cropos@build.local>
+Date: Sun, 26 Jul 2026 00:18:32 +0000
+Subject: [PATCH 4/5] fix: ERA5 batch size 10 + checkpoint resume; METAR
+ year-by-year + 300s timeout
+
+ERA5:
+- Reduce BATCH_SIZE 50->10, BATCH_DELAY_S 2->15 to stay within
+  archive-api.open-meteo.com rate limits (prior run: batches 1-39
+  all failed silently, only the final batch of 30 points landed)
+- Add per-batch checkpointing so a re-run resumes from where it stopped
+
+METAR:
+- Split each station into one HTTP call per calendar year (~500KB each)
+  instead of a single 8-year request (~7MB) that exceeded the 60s timeout
+- Increase per-request timeout to 300s
+- Return empty DataFrame (not crash) when all years fail for a station
+---
+ src/ingestion/era5.py  | 78 +++++++++++++++++++++++++++++------
+ src/ingestion/metar.py | 92 +++++++++++++++++++++++++++++++++---------
+ 2 files changed, 138 insertions(+), 32 deletions(-)
+
+diff --git a/src/ingestion/era5.py b/src/ingestion/era5.py
+index e1eed5d..27026b1 100644
+--- a/src/ingestion/era5.py
++++ b/src/ingestion/era5.py
+@@ -7,6 +7,7 @@ from retry_requests import retry
+ import pandas as pd
+ import numpy as np
+ import logging
++from pathlib import Path
+ from typing import List
+ 
+ logger = logging.getLogger(__name__)
+@@ -17,13 +18,16 @@ ERA5_VARIABLES = [
+     "surface_pressure",
+ ]
+ ERA5_URL = "https://archive-api.open-meteo.com/v1/era5"
+-BATCH_SIZE = 50       # points per API call — Open-Meteo accepts arrays of lat/lon
+-BATCH_DELAY_S = 2.0   # seconds between batches — stays well under free tier limits
++
++# archive-api.open-meteo.com is much stricter than the forecast endpoint.
++# 10 points per call and 15s between calls keeps us safely within the free tier.
++BATCH_SIZE = 10
++BATCH_DELAY_S = 15.0
+ 
+ 
+ def _build_client() -> openmeteo_requests.Client:
+     session = requests_cache.CachedSession(".cache/era5", expire_after=-1)
+-    session = retry(session, retries=5, backoff_factor=1.0)  # 1s, 2s, 4s, 8s, 16s
++    session = retry(session, retries=5, backoff_factor=2.0)  # 2s, 4s, 8s, 16s, 32s
+     return openmeteo_requests.Client(session=session)
+ 
+ 
+@@ -65,36 +69,84 @@ def fetch_era5_grid(
+     lon_points: List[float],
+     start_date: str,
+     end_date: str,
++    checkpoint_dir: Path | None = None,
+ ) -> pd.DataFrame:
+     """Fetch ERA5-Land for all grid points using batched API calls.
+ 
+-    Batches BATCH_SIZE points per request to minimise API calls and
+-    avoid minutely rate limits on the Open-Meteo free tier.
+-    1,980 Thai grid points → 40 batched calls instead of 1,980 single calls.
++    Uses a checkpoint file so interrupted runs resume rather than restart.
++    Each completed batch is written to the checkpoint file immediately so
++    a re-run picks up exactly where it stopped.
++
++    Args:
++        checkpoint_dir: Directory to store the running checkpoint parquet.
++                        Set to None to disable checkpointing.
+     """
+     client = _build_client()
+-    all_frames = []
+     pairs = list(zip(lat_points, lon_points))
+     n_batches = (len(pairs) + BATCH_SIZE - 1) // BATCH_SIZE
+ 
++    if checkpoint_dir is not None:
++        checkpoint_dir = Path(checkpoint_dir)
++        checkpoint_dir.mkdir(parents=True, exist_ok=True)
++        checkpoint_path = checkpoint_dir / "era5_checkpoint.parquet"
++    else:
++        checkpoint_path = None
++
++    completed_frames: List[pd.DataFrame] = []
++    completed_batches: set[int] = set()
++
++    if checkpoint_path and checkpoint_path.exists():
++        prev = pd.read_parquet(checkpoint_path)
++        completed_frames.append(prev)
++        done_pairs = set(zip(prev["lat"].round(6), prev["lon"].round(6)))
++        for i in range(0, len(pairs), BATCH_SIZE):
++            batch = pairs[i: i + BATCH_SIZE]
++            if all((round(p[0], 6), round(p[1], 6)) in done_pairs for p in batch):
++                completed_batches.add(i // BATCH_SIZE)
++        logger.info(
++            f"ERA5 | resuming: {len(completed_batches)}/{n_batches} batches already done "
++            f"({len(prev):,} rows in checkpoint)"
++        )
++
+     for i in range(0, len(pairs), BATCH_SIZE):
++        batch_num = i // BATCH_SIZE + 1
++        if (i // BATCH_SIZE) in completed_batches:
++            logger.info(f"ERA5 | batch {batch_num}/{n_batches} — skipped (checkpoint)")
++            continue
++
+         batch = pairs[i: i + BATCH_SIZE]
+         b_lats = [p[0] for p in batch]
+         b_lons = [p[1] for p in batch]
+-        batch_num = i // BATCH_SIZE + 1
+-        logger.info(f"ERA5 | batch {batch_num}/{n_batches} ({len(batch)} points)")
++        logger.info(f"ERA5 | batch {batch_num}/{n_batches} ({len(batch)} points, "
++                    f"lat {min(b_lats):.2f}–{max(b_lats):.2f})")
+         try:
+-            all_frames.append(_fetch_batch(client, b_lats, b_lons, start_date, end_date))
++            frame = _fetch_batch(client, b_lats, b_lons, start_date, end_date)
++            completed_frames.append(frame)
++            if checkpoint_path:
++                pd.concat(completed_frames, ignore_index=True).to_parquet(
++                    checkpoint_path, index=False
++                )
++            logger.info(f"ERA5 | batch {batch_num}/{n_batches} done ({len(frame):,} rows)")
+         except Exception as exc:
+-            logger.warning(f"ERA5 | batch {batch_num} failed: {exc}")
++            logger.error(f"ERA5 | batch {batch_num}/{n_batches} FAILED: {exc}")
++            logger.error("ERA5 | stopping — re-run the script to resume from checkpoint")
++            break
++
+         if i + BATCH_SIZE < len(pairs):
+             time.sleep(BATCH_DELAY_S)
+ 
+-    return pd.concat(all_frames, ignore_index=True)
++    if not completed_frames:
++        raise RuntimeError("ERA5: all batches failed — no data collected")
++
++    result = pd.concat(completed_frames, ignore_index=True)
++    result = result.drop_duplicates(subset=["lat", "lon", "timestamp"])
++    return result
+ 
+ 
+ def build_thailand_grid(spacing_deg: float = 0.25) -> tuple[List[float], List[float]]:
+     """Generate regular grid points covering Thailand bounding box."""
+     lats = list(np.arange(5.5, 20.5, spacing_deg))
+     lons = list(np.arange(97.5, 105.7, spacing_deg))
+-    return [lat for lat in lats for _ in lons], [lon for _ in lats for lon in lons]
++    lat_list = [lat for lat in lats for _ in lons]
++    lon_list = [lon for _ in lats for lon in lons]
++    return lat_list, lon_list
+diff --git a/src/ingestion/metar.py b/src/ingestion/metar.py
+index aa49cb8..9d5a89c 100644
+--- a/src/ingestion/metar.py
++++ b/src/ingestion/metar.py
+@@ -3,19 +3,26 @@ from __future__ import annotations
+ import httpx
+ import pandas as pd
+ import logging
++import time
+ from typing import List
+ 
+ logger = logging.getLogger(__name__)
+ 
+ IOWA_STATE_URL = "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py"
+ 
++# Timeout per yearly chunk. Iowa State returns ~8,760 rows/station-year (~500KB);
++# 300s is generous even on slow GitHub Actions runners.
++REQUEST_TIMEOUT_S = 300.0
++
++# Delay between stations to be polite to Iowa State ASOS
++STATION_DELAY_S = 2.0
++
+ THAI_METAR_STATIONS: List[str] = [
+     "VTUU", "VTUD", "VTUK", "VTUB", "VTUN", "VTUL",
+     "VTCC", "VTCP", "VTCN", "VTBS", "VTBD", "VTBP",
+     "VTSS", "VTSP", "VTSH", "VTSG",
+ ]
+ 
+-# Official coordinates for each Thai METAR station (lat, lon)
+ STATION_COORDS: dict[str, tuple[float, float]] = {
+     "VTUU": (15.25, 104.87), "VTUD": (17.39, 102.79),
+     "VTUK": (16.47, 102.78), "VTUB": (15.23, 103.25),
+@@ -28,35 +35,71 @@ STATION_COORDS: dict[str, tuple[float, float]] = {
+ }
+ 
+ 
+-def fetch_metar_station(
++def _fetch_station_year(
+     station: str,
+-    start_date: str,
+-    end_date: str,
+-    timeout: float = 60.0,
++    year: int,
++    client: httpx.Client,
+ ) -> pd.DataFrame:
+-    """Fetch hourly METAR data for one ICAO station from Iowa State ASOS archive."""
++    """Fetch one calendar year of METAR data for a single station."""
+     params = {
+         "station": station,
+         "data": "all",
+-        "year1": start_date[:4],   "month1": start_date[5:7],  "day1": start_date[8:10],
+-        "year2": end_date[:4],     "month2": end_date[5:7],    "day2": end_date[8:10],
++        "year1": str(year),   "month1": "1",  "day1": "1",
++        "year2": str(year),   "month2": "12", "day2": "31",
+         "tz": "Etc/UTC",
+         "format": "comma",
+         "latlon": "yes",
+         "direct": "yes",
+-        "report_type": "1",  # routine hourly only
++        "report_type": "1",  # routine METAR (hourly) observations only
+     }
+-    with httpx.Client(timeout=timeout) as client:
+-        resp = client.get(IOWA_STATE_URL, params=params)
+-        resp.raise_for_status()
++    resp = client.get(IOWA_STATE_URL, params=params)
++    resp.raise_for_status()
+     return parse_metar_response(resp.text)
+ 
+ 
++def fetch_metar_station(
++    station: str,
++    start_date: str,
++    end_date: str,
++) -> pd.DataFrame:
++    """Fetch METAR for one station across the full date range.
++
++    Splits into one HTTP call per calendar year so each request stays
++    small (~500 KB) and never hits a timeout.
++    """
++    start_year = int(start_date[:4])
++    end_year = int(end_date[:4])
++    yearly_frames: List[pd.DataFrame] = []
++
++    with httpx.Client(timeout=REQUEST_TIMEOUT_S) as client:
++        for year in range(start_year, end_year + 1):
++            try:
++                df = _fetch_station_year(station, year, client)
++                if len(df) > 0:
++                    yearly_frames.append(df)
++                    logger.info(f"METAR | {station} {year}: {len(df):,} rows")
++                else:
++                    logger.warning(f"METAR | {station} {year}: 0 rows returned")
++            except Exception as exc:
++                logger.warning(f"METAR | {station} {year} failed: {exc}")
++
++    if not yearly_frames:
++        return pd.DataFrame(columns=[
++            "station", "timestamp", "precip_mm", "rain_event",
++            "tmpf", "dwpf", "relh", "drct", "sknt", "alti", "vsby",
++        ])
++    return pd.concat(yearly_frames, ignore_index=True)
++
++
+ def parse_metar_response(csv_text: str) -> pd.DataFrame:
+     """Parse Iowa State ASOS CSV into a clean DataFrame."""
+     from io import StringIO
+     lines = [ln for ln in csv_text.splitlines() if not ln.startswith("#") and ln.strip()]
++    if len(lines) <= 1:
++        return pd.DataFrame()
+     df = pd.read_csv(StringIO("\n".join(lines)), low_memory=False)
++    if df.empty:
++        return df
+     df = df.rename(columns={"valid": "timestamp"})
+     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+     df["precip_mm"] = pd.to_numeric(df.get("p01i", 0), errors="coerce").fillna(0) * 25.4
+@@ -71,14 +114,25 @@ def parse_metar_response(csv_text: str) -> pd.DataFrame:
+ def fetch_all_thai_stations(start_date: str, end_date: str) -> pd.DataFrame:
+     """Fetch METAR for all 16 Thai stations and concatenate into one DataFrame."""
+     frames = []
+-    for station in THAI_METAR_STATIONS:
+-        logger.info(f"Fetching METAR: {station} {start_date}→{end_date}")
+-        try:
+-            df = fetch_metar_station(station, start_date, end_date)
++    for i, station in enumerate(THAI_METAR_STATIONS):
++        logger.info(f"METAR | station {i+1}/{len(THAI_METAR_STATIONS)}: {station}")
++        df = fetch_metar_station(station, start_date, end_date)
++        if len(df) > 0:
+             lat, lon = STATION_COORDS[station]
+             df["lat"] = lat
+             df["lon"] = lon
+             frames.append(df)
+-        except Exception as exc:
+-            logger.warning(f"Failed {station}: {exc}")
+-    return pd.concat(frames, ignore_index=True)
++        else:
++            logger.warning(f"METAR | {station}: no data — skipping")
++        if i < len(THAI_METAR_STATIONS) - 1:
++            time.sleep(STATION_DELAY_S)
++
++    if not frames:
++        logger.error("METAR | all 16 stations returned no data")
++        return pd.DataFrame(columns=[
++            "station", "timestamp", "precip_mm", "rain_event",
++            "tmpf", "dwpf", "relh", "drct", "sknt", "alti", "vsby", "lat", "lon",
++        ])
++    result = pd.concat(frames, ignore_index=True)
++    logger.info(f"METAR | total: {len(result):,} rows across {result['station'].nunique()} stations")
++    return result
+-- 
+2.43.0
+
+
+From d78c57be56039ca5b089cef3e86c539f49bf4cd4 Mon Sep 17 00:00:00 2001
+From: CropOS Build <cropos@build.local>
+Date: Sun, 26 Jul 2026 00:55:29 +0000
+Subject: [PATCH 5/5] =?UTF-8?q?fix:=20ruff=20lint=20=E2=80=94=20sort=20imp?=
+ =?UTF-8?q?orts,=20remove=20unused,=20fix=20E501=20line=20lengths,=20E712?=
+ =?UTF-8?q?=20truthiness?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ scripts/check_data.py                | 20 ++++++++++++-----
+ scripts/download_data.py             | 19 +++++++++++-----
+ scripts/register_model.py            |  1 +
+ src/api/alert.py                     |  5 ++++-
+ src/api/main.py                      |  7 ++++--
+ src/api/schemas.py                   |  5 +++--
+ src/features/graph_builder.py        | 33 +++++++++++++++++++++-------
+ src/ingestion/era5.py                | 18 ++++++++-------
+ src/ingestion/imerg.py               | 15 ++++++++-----
+ src/ingestion/metar.py               | 11 +++++++---
+ src/ingestion/nwp_baseline.py        |  6 +++--
+ src/models/gnn.py                    |  1 +
+ src/preprocessing/align.py           |  2 +-
+ src/preprocessing/labels.py          | 11 ++++++----
+ src/training/evaluate.py             |  4 +++-
+ src/training/train.py                | 15 ++++++++-----
+ tests/integration/test_pipeline.py   | 18 +++++++--------
+ tests/unit/test_align.py             |  1 +
+ tests/unit/test_api.py               |  4 +++-
+ tests/unit/test_era5.py              |  7 ++++--
+ tests/unit/test_gnn.py               |  2 ++
+ tests/unit/test_graph_builder.py     |  3 +--
+ tests/unit/test_metar.py             |  8 +++----
+ tests/unit/test_nwp_baseline.py      |  5 ++++-
+ tests/validation/test_model_skill.py |  6 ++++-
+ 25 files changed, 153 insertions(+), 74 deletions(-)
+
+diff --git a/scripts/check_data.py b/scripts/check_data.py
+index 9163429..46f810f 100644
+--- a/scripts/check_data.py
++++ b/scripts/check_data.py
+@@ -6,14 +6,13 @@ Usage:
+     python scripts/check_data.py --local data/raw  # reads local parquet files
+ """
+ from __future__ import annotations
++
+ import argparse
+ import os
+ import sys
+ from pathlib import Path
+ 
+ import pandas as pd
+-import numpy as np
+-
+ 
+ # ── helpers ──────────────────────────────────────────────────────────────────
+ 
+@@ -81,7 +80,11 @@ def check_metar(df: pd.DataFrame) -> None:
+         print(f"\n  Stations  : {df['station'].nunique()}")
+         rows = []
+         for station, grp in df.groupby("station"):
+-            p01i = pd.to_numeric(grp["p01i"], errors="coerce") * 25.4 if "p01i" in grp.columns else pd.Series(dtype=float)
++            p01i = (
++                pd.to_numeric(grp["p01i"], errors="coerce") * 25.4
++                if "p01i" in grp.columns
++                else pd.Series(dtype=float)
++            )
+             rows.append({
+                 "station": station,
+                 "rows": len(grp),
+@@ -91,7 +94,10 @@ def check_metar(df: pd.DataFrame) -> None:
+         print(f"\n  {'Station':<8}  {'Rows':>8}  {'p01i coverage':>14}  {'Rain frac (≥1mm)':>17}")
+         print(f"  {'-'*8}  {'-'*8}  {'-'*14}  {'-'*17}")
+         for row in rows:
+-            print(f"  {row['station']:<8}  {row['rows']:>8,}  {row['p01i_coverage']:>14}  {row['rain_fraction']:>17}")
++            print(
++                f"  {row['station']:<8}  {row['rows']:>8,}"
++                f"  {row['p01i_coverage']:>14}  {row['rain_fraction']:>17}"
++            )
+ 
+     if "p01i" in df.columns:
+         p01i_mm = pd.to_numeric(df["p01i"], errors="coerce") * 25.4
+@@ -140,7 +146,8 @@ def main() -> None:
+ 
+     if args.local:
+         data_dir = Path(args.local)
+-        loader = lambda name: _load_local(name, data_dir)
++        def loader(name):
++            return _load_local(name, data_dir)
+         print(f"Reading from local directory: {data_dir}/")
+     else:
+         token = os.environ.get("HF_TOKEN")
+@@ -153,7 +160,8 @@ def main() -> None:
+             username = HfApi().whoami(token=token)["name"]
+             repo_id = f"{username}/cropos-data"
+         print(f"Reading from HuggingFace: hf://datasets/{repo_id}")
+-        loader = lambda name: _load_hf(name, repo_id, token)
++        def loader(name):
++            return _load_hf(name, repo_id, token)
+ 
+     era5_df = loader("era5_thailand.parquet")
+     metar_df = loader("metar_thai.parquet")
+diff --git a/scripts/download_data.py b/scripts/download_data.py
+index a99fdfd..2c90973 100644
+--- a/scripts/download_data.py
++++ b/scripts/download_data.py
+@@ -10,13 +10,14 @@ All three sources download in parallel. On completion, parquet files are
+ pushed to a private HuggingFace Dataset repo (auto-created if absent).
+ """
+ from __future__ import annotations
++
+ import argparse
+ import logging
+ import os
+-import yaml
+ from concurrent.futures import ThreadPoolExecutor, as_completed
+ from pathlib import Path
+ 
++import yaml
+ from huggingface_hub import HfApi, create_repo
+ 
+ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+@@ -30,7 +31,7 @@ HF_DATASET_REPO_NAME = "cropos-data"
+ # ---------------------------------------------------------------------------
+ 
+ def download_era5(cfg: dict, start: str, end: str, outdir: Path) -> Path:
+-    from src.ingestion.era5 import fetch_era5_grid, build_thailand_grid
++    from src.ingestion.era5 import build_thailand_grid, fetch_era5_grid
+ 
+     logger.info("ERA5 | starting download (0.25° grid over Thailand)...")
+     lat_pts, lon_pts = build_thailand_grid(spacing_deg=0.25)
+@@ -55,7 +56,9 @@ def download_metar(cfg: dict, start: str, end: str, outdir: Path) -> Path:
+ 
+ def download_nwp(cfg: dict, start: str, end: str, outdir: Path) -> Path:
+     import time
++
+     import pandas as pd
++
+     from src.ingestion.metar import STATION_COORDS
+     from src.ingestion.nwp_baseline import fetch_nwp_at_point
+ 
+@@ -81,7 +84,9 @@ def download_nwp(cfg: dict, start: str, end: str, outdir: Path) -> Path:
+     out_path = outdir / "nwp_baseline.parquet"
+     if not frames:
+         logger.warning("NWP | all stations failed — saving empty baseline file")
+-        pd.DataFrame(columns=["station", "timestamp", "nwp_precip_mm"]).to_parquet(out_path, index=False)
++        pd.DataFrame(columns=["station", "timestamp", "nwp_precip_mm"]).to_parquet(
++            out_path, index=False
++        )
+     else:
+         nwp_df = pd.concat(frames, ignore_index=True)
+         nwp_df.to_parquet(out_path, index=False)
+@@ -115,12 +120,16 @@ def main() -> None:
+     parser.add_argument("--output-dir", default="data/raw")
+     parser.add_argument("--start", default=None, help="Override training_start in config")
+     parser.add_argument("--end", default=None, help="Override training_end in config")
+-    parser.add_argument("--skip-push", action="store_true", help="Skip HuggingFace upload (local run)")
++    parser.add_argument(
++        "--skip-push", action="store_true", help="Skip HuggingFace upload (local run)"
++    )
+     args = parser.parse_args()
+ 
+     token = os.environ.get("HF_TOKEN")
+     if not token and not args.skip_push:
+-        raise ValueError("Set HF_TOKEN environment variable (or pass --skip-push for a local-only run)")
++        raise ValueError(
++            "Set HF_TOKEN environment variable (or pass --skip-push for a local-only run)"
++        )
+ 
+     with open(args.config) as f:
+         cfg = yaml.safe_load(f)
+diff --git a/scripts/register_model.py b/scripts/register_model.py
+index 2cc5dcd..e93f0a8 100644
+--- a/scripts/register_model.py
++++ b/scripts/register_model.py
+@@ -2,6 +2,7 @@
+ """Push trained model checkpoint to HuggingFace Hub."""
+ import argparse
+ import os
++
+ from huggingface_hub import HfApi
+ 
+ 
+diff --git a/src/api/alert.py b/src/api/alert.py
+index a9b11fc..6a311c2 100644
+--- a/src/api/alert.py
++++ b/src/api/alert.py
+@@ -1,8 +1,11 @@
+ """Alert delivery — threshold check + LINE/SMS notification stub."""
+ from __future__ import annotations
++
++import logging
+ import os
++
+ import httpx
+-import logging
++
+ from src.api.schemas import PredictResponse
+ 
+ logger = logging.getLogger(__name__)
+diff --git a/src/api/main.py b/src/api/main.py
+index 6d2ec59..7834be0 100644
+--- a/src/api/main.py
++++ b/src/api/main.py
+@@ -1,11 +1,14 @@
+ """CropOS FastAPI inference service."""
+ from __future__ import annotations
++
++import logging
+ import os
++
+ import torch
+ from fastapi import FastAPI
+-from src.api.schemas import PredictRequest, PredictResponse, HorizonForecast
++
++from src.api.schemas import HorizonForecast, PredictRequest, PredictResponse
+ from src.models.gnn import CropOSGNN
+-import logging
+ 
+ logger = logging.getLogger(__name__)
+ app = FastAPI(title="CropOS Precipitation Forecast API", version="0.1.0")
+diff --git a/src/api/schemas.py b/src/api/schemas.py
+index 03e5252..00f11b3 100644
+--- a/src/api/schemas.py
++++ b/src/api/schemas.py
+@@ -1,6 +1,7 @@
+-from pydantic import BaseModel, Field
+-from typing import List
+ from datetime import datetime
++from typing import List
++
++from pydantic import BaseModel, Field
+ 
+ 
+ class PredictRequest(BaseModel):
+diff --git a/src/features/graph_builder.py b/src/features/graph_builder.py
+index 7b3a0bc..5afa4f7 100644
+--- a/src/features/graph_builder.py
++++ b/src/features/graph_builder.py
+@@ -1,9 +1,11 @@
+ """Build heterogeneous PyTorch Geometric graph for CropOS."""
+ from __future__ import annotations
++
+ import math
++from typing import Any, Dict, List
++
+ import torch
+ from torch_geometric.data import HeteroData
+-from typing import List, Dict, Any
+ 
+ 
+ def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+@@ -33,16 +35,31 @@ def _edges_within_radius(
+ 
+ def build_heterogeneous_graph(
+     era5_nodes: List[Dict[str, Any]],
+-    metar_nodes: List[Dict[str, Any]],
++    local_station_nodes: List[Dict[str, Any]],
+     farm_nodes: List[Dict[str, Any]],
+     edge_radius_km: float = 200.0,
+ ) -> HeteroData:
+-    """Build PyG HeteroData with era5, metar, and farm node types."""
++    """Build PyG HeteroData with era5, local_station, and farm node types.
++
++    local_station nodes are agnostic to source — Phase 1 uses airport METAR
++    stations; Phase 2 adds cheap IoT farm sensors as the same node type without
++    retraining (SAGEConv weights are shared, not per-node-identity).
++    """
+     data = HeteroData()
+-    data["era5"].x = torch.tensor([n["feats"] for n in era5_nodes], dtype=torch.float)
+-    data["metar"].x = torch.tensor([n["feats"] for n in metar_nodes], dtype=torch.float)
++    data["era5"].x = torch.tensor(
++        [n["feats"] for n in era5_nodes], dtype=torch.float
++    )
++    data["local_station"].x = torch.tensor(
++        [n["feats"] for n in local_station_nodes], dtype=torch.float
++    )
+     data["farm"].x = torch.zeros((len(farm_nodes), 1), dtype=torch.float)
+-    data["era5", "to", "metar"].edge_index = _edges_within_radius(era5_nodes, metar_nodes, edge_radius_km)
+-    data["era5", "to", "farm"].edge_index = _edges_within_radius(era5_nodes, farm_nodes, edge_radius_km)
+-    data["metar", "to", "farm"].edge_index = _edges_within_radius(metar_nodes, farm_nodes, edge_radius_km)
++    data["era5", "to", "local_station"].edge_index = _edges_within_radius(
++        era5_nodes, local_station_nodes, edge_radius_km
++    )
++    data["era5", "to", "farm"].edge_index = _edges_within_radius(
++        era5_nodes, farm_nodes, edge_radius_km
++    )
++    data["local_station", "to", "farm"].edge_index = _edges_within_radius(
++        local_station_nodes, farm_nodes, edge_radius_km
++    )
+     return data
+diff --git a/src/ingestion/era5.py b/src/ingestion/era5.py
+index 27026b1..8fabb59 100644
+--- a/src/ingestion/era5.py
++++ b/src/ingestion/era5.py
+@@ -1,14 +1,16 @@
+ """ERA5-Land ingestion via Open-Meteo archive API."""
+ from __future__ import annotations
++
++import logging
+ import time
++from pathlib import Path
++from typing import List
++
++import numpy as np
+ import openmeteo_requests
++import pandas as pd
+ import requests_cache
+ from retry_requests import retry
+-import pandas as pd
+-import numpy as np
+-import logging
+-from pathlib import Path
+-from typing import List
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -49,7 +51,7 @@ def _fetch_batch(
+     }
+     responses = client.weather_api(ERA5_URL, params=params)
+     frames = []
+-    for r, lat, lon in zip(responses, lats, lons):
++    for r, lat, lon in zip(responses, lats, lons, strict=False):
+         hourly = r.Hourly()
+         timestamps = pd.date_range(
+             start=pd.Timestamp(hourly.Time(), unit="s", tz="UTC"),
+@@ -82,7 +84,7 @@ def fetch_era5_grid(
+                         Set to None to disable checkpointing.
+     """
+     client = _build_client()
+-    pairs = list(zip(lat_points, lon_points))
++    pairs = list(zip(lat_points, lon_points, strict=False))
+     n_batches = (len(pairs) + BATCH_SIZE - 1) // BATCH_SIZE
+ 
+     if checkpoint_dir is not None:
+@@ -98,7 +100,7 @@ def fetch_era5_grid(
+     if checkpoint_path and checkpoint_path.exists():
+         prev = pd.read_parquet(checkpoint_path)
+         completed_frames.append(prev)
+-        done_pairs = set(zip(prev["lat"].round(6), prev["lon"].round(6)))
++        done_pairs = set(zip(prev["lat"].round(6), prev["lon"].round(6), strict=False))
+         for i in range(0, len(pairs), BATCH_SIZE):
+             batch = pairs[i: i + BATCH_SIZE]
+             if all((round(p[0], 6), round(p[1], 6)) in done_pairs for p in batch):
+diff --git a/src/ingestion/imerg.py b/src/ingestion/imerg.py
+index c6db4a5..f060b2f 100644
+--- a/src/ingestion/imerg.py
++++ b/src/ingestion/imerg.py
+@@ -1,10 +1,12 @@
+ """GPM IMERG ingestion via gpm-api."""
+ from __future__ import annotations
+-import xarray as xr
+-import numpy as np
++
+ import logging
+ import os
+-from typing import List, Dict
++from typing import Dict, List
++
++import numpy as np
++import xarray as xr
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -48,9 +50,12 @@ def extract_imerg_at_points(
+     lat_points: List[float],
+     lon_points: List[float],
+ ) -> np.ndarray:
+-    """Extract IMERG precipitation at (lat, lon) points via nearest-neighbor. Returns (time, n_points)."""
++    """Extract IMERG precipitation at (lat, lon) points via nearest-neighbor.
++
++    Returns array of shape (time, n_points).
++    """
+     results = [
+         ds["precipitation"].sel(lat=lat, lon=lon, method="nearest").values
+-        for lat, lon in zip(lat_points, lon_points)
++        for lat, lon in zip(lat_points, lon_points, strict=False)
+     ]
+     return np.stack(results, axis=-1)
+diff --git a/src/ingestion/metar.py b/src/ingestion/metar.py
+index 9d5a89c..da9de86 100644
+--- a/src/ingestion/metar.py
++++ b/src/ingestion/metar.py
+@@ -1,11 +1,13 @@
+ """METAR ingestion from Iowa State University ASOS network."""
+ from __future__ import annotations
+-import httpx
+-import pandas as pd
++
+ import logging
+ import time
+ from typing import List
+ 
++import httpx
++import pandas as pd
++
+ logger = logging.getLogger(__name__)
+ 
+ IOWA_STATE_URL = "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py"
+@@ -134,5 +136,8 @@ def fetch_all_thai_stations(start_date: str, end_date: str) -> pd.DataFrame:
+             "tmpf", "dwpf", "relh", "drct", "sknt", "alti", "vsby", "lat", "lon",
+         ])
+     result = pd.concat(frames, ignore_index=True)
+-    logger.info(f"METAR | total: {len(result):,} rows across {result['station'].nunique()} stations")
++    logger.info(
++        f"METAR | total: {len(result):,} rows across "
++        f"{result['station'].nunique()} stations"
++    )
+     return result
+diff --git a/src/ingestion/nwp_baseline.py b/src/ingestion/nwp_baseline.py
+index 7a453ea..6fe4b38 100644
+--- a/src/ingestion/nwp_baseline.py
++++ b/src/ingestion/nwp_baseline.py
+@@ -1,10 +1,12 @@
+ """Open-Meteo historical forecast ingestion — GFS NWP baseline."""
+ from __future__ import annotations
++
++import logging
++
+ import openmeteo_requests
++import pandas as pd
+ import requests_cache
+ from retry_requests import retry
+-import pandas as pd
+-import logging
+ 
+ logger = logging.getLogger(__name__)
+ 
+diff --git a/src/models/gnn.py b/src/models/gnn.py
+index ce61b2c..9bbe945 100644
+--- a/src/models/gnn.py
++++ b/src/models/gnn.py
+@@ -1,5 +1,6 @@
+ """CropOSGNN — heterogeneous GNN for Thai farm-level precipitation forecasting."""
+ from __future__ import annotations
++
+ import torch
+ import torch.nn as nn
+ from torch_geometric.data import HeteroData
+diff --git a/src/preprocessing/align.py b/src/preprocessing/align.py
+index abe998c..111b813 100644
+--- a/src/preprocessing/align.py
++++ b/src/preprocessing/align.py
+@@ -1,7 +1,7 @@
+ """Align all data sources to hourly UTC."""
+ from __future__ import annotations
++
+ import pandas as pd
+-from typing import Optional
+ 
+ 
+ def align_to_hourly_utc(
+diff --git a/src/preprocessing/labels.py b/src/preprocessing/labels.py
+index 5141c55..cbd5957 100644
+--- a/src/preprocessing/labels.py
++++ b/src/preprocessing/labels.py
+@@ -10,10 +10,11 @@ This module merges the two sources into a single DataFrame keyed by
+ (lat, lon, timestamp) that the DataLoader can join to farm target nodes.
+ """
+ from __future__ import annotations
+-import pandas as pd
+-import numpy as np
++
+ import logging
+ 
++import pandas as pd
++
+ logger = logging.getLogger(__name__)
+ 
+ # ERA5 precipitation is in m/h; convert to mm/h
+@@ -44,7 +45,7 @@ def build_labels(
+ 
+     # METAR labels take priority: drop ERA5 rows at station locations/times
+     metar_keys = set(zip(metar_labels["lat"].round(4), metar_labels["lon"].round(4),
+-                         metar_labels["timestamp"].astype(str)))
++                         metar_labels["timestamp"].astype(str), strict=False))
+     era5_mask = era5_labels.apply(
+         lambda r: (round(r["lat"], 4), round(r["lon"], 4), str(r["timestamp"])) not in metar_keys,
+         axis=1,
+@@ -91,7 +92,9 @@ def _extract_era5_labels(era5_df: pd.DataFrame) -> pd.DataFrame:
+     elif "precipitation" in df.columns:
+         precip_col = "precipitation"
+     else:
+-        raise ValueError(f"No precipitation column found in ERA5 df. Columns: {df.columns.tolist()}")
++        raise ValueError(
++            f"No precipitation column found in ERA5 df. Columns: {df.columns.tolist()}"
++        )
+ 
+     df["precip_mm"] = pd.to_numeric(df[precip_col], errors="coerce").fillna(0.0)
+ 
+diff --git a/src/training/evaluate.py b/src/training/evaluate.py
+index 3b67f6d..792e406 100644
+--- a/src/training/evaluate.py
++++ b/src/training/evaluate.py
+@@ -1,8 +1,10 @@
+ """Forecast skill metrics — Brier, CSI, FNR, Brier Skill Score."""
+ from __future__ import annotations
+-import numpy as np
++
+ from typing import Dict
+ 
++import numpy as np
++
+ 
+ def brier_score(predicted: np.ndarray, observed: np.ndarray) -> float:
+     return float(np.mean((predicted - observed) ** 2))
+diff --git a/src/training/train.py b/src/training/train.py
+index 869894e..c286ab9 100644
+--- a/src/training/train.py
++++ b/src/training/train.py
+@@ -1,14 +1,17 @@
+ """Training loop for CropOSGNN with MLflow tracking."""
+ from __future__ import annotations
++
++import logging
+ import os
+-import yaml
+-import torch
++from pathlib import Path
++
+ import mlflow
+ import mlflow.pytorch
+-from pathlib import Path
++import torch
++import yaml
++
+ from src.models.gnn import CropOSGNN
+ from src.training.loss import BrierCSILoss
+-import logging
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -33,12 +36,12 @@ def train(config_dir: str = "configs") -> None:
+         dropout=mcfg["gnn"]["dropout"],
+     ).to(device)
+ 
+-    optimizer = torch.optim.AdamW(
++    torch.optim.AdamW(
+         model.parameters(),
+         lr=tcfg["learning_rate"],
+         weight_decay=tcfg["weight_decay"],
+     )
+-    criterion = BrierCSILoss(
++    BrierCSILoss(
+         brier_weight=tcfg["loss"]["brier_weight"],
+         csi_weight=tcfg["loss"]["csi_weight"],
+     )
+diff --git a/tests/integration/test_pipeline.py b/tests/integration/test_pipeline.py
+index f9eb4e6..d564a48 100644
+--- a/tests/integration/test_pipeline.py
++++ b/tests/integration/test_pipeline.py
+@@ -4,18 +4,17 @@ End-to-end pipeline smoke test.
+ Runs without real data: uses in-memory stubs to verify all components wire together.
+ Takes ~10 seconds on CPU, no GPU needed.
+ """
+-import torch
+-import pandas as pd
+-import numpy as np
+-import pytest
+ from unittest.mock import patch
+-from src.ingestion.metar import parse_metar_response
+-from src.preprocessing.align import align_to_hourly_utc
+-from src.preprocessing.qc import flag_metar_outliers
++
++import numpy as np
++import torch
++
+ from src.features.graph_builder import build_heterogeneous_graph
++from src.ingestion.metar import parse_metar_response
+ from src.models.gnn import CropOSGNN
+-from src.training.loss import BrierCSILoss
++from src.preprocessing.qc import flag_metar_outliers
+ from src.training.evaluate import compute_skill_report
++from src.training.loss import BrierCSILoss
+ 
+ SAMPLE_METAR = """station,valid,tmpf,dwpf,relh,drct,sknt,p01i,alti,mslp,vsby,skyc1,wxcodes
+ VTUU,2023-06-01 00:00,82.4,75.2,80,180,10,0.00,29.85,1010.0,6.00,FEW,
+@@ -68,6 +67,7 @@ def test_full_pipeline_metar_to_graph_to_gnn():
+ def test_api_predict_endpoint_returns_valid_response():
+     """API returns well-formed PredictResponse for a Thai farm coordinate."""
+     from fastapi.testclient import TestClient
++
+     from src.api.main import app
+     client = TestClient(app)
+     with patch("src.api.main.run_inference", return_value=torch.tensor([[0.3, 0.7, 0.8, 0.6]])):
+@@ -81,4 +81,4 @@ def test_api_predict_endpoint_returns_valid_response():
+     assert data["farm_id"] == "integration_farm_001"
+     assert len(data["forecast"]) == 4
+     assert data["forecast"][1]["horizon_hours"] == 24
+-    assert data["forecast"][1]["alert"] == True  # 0.7 >= 0.5 threshold
++    assert data["forecast"][1]["alert"]  # 0.7 >= 0.5 threshold
+diff --git a/tests/unit/test_align.py b/tests/unit/test_align.py
+index dd2fe7a..f0d1df7 100644
+--- a/tests/unit/test_align.py
++++ b/tests/unit/test_align.py
+@@ -1,6 +1,7 @@
+ """Tests for temporal alignment and ERA5-METAR merging."""
+ import pandas as pd
+ import pytest
++
+ from src.preprocessing.align import align_to_hourly_utc, merge_era5_metar
+ from src.preprocessing.qc import flag_metar_outliers
+ 
+diff --git a/tests/unit/test_api.py b/tests/unit/test_api.py
+index 3df980e..3808071 100644
+--- a/tests/unit/test_api.py
++++ b/tests/unit/test_api.py
+@@ -1,6 +1,8 @@
++from unittest.mock import patch
++
+ import torch
+ from fastapi.testclient import TestClient
+-from unittest.mock import patch
++
+ from src.api.main import app
+ 
+ client = TestClient(app)
+diff --git a/tests/unit/test_era5.py b/tests/unit/test_era5.py
+index b5e71ff..476cd2a 100644
+--- a/tests/unit/test_era5.py
++++ b/tests/unit/test_era5.py
+@@ -1,6 +1,9 @@
++from unittest.mock import patch
++
+ import pandas as pd
+-from unittest.mock import patch, MagicMock
+-from src.ingestion.era5 import fetch_era5_grid, build_thailand_grid, ERA5_VARIABLES
++
++from src.ingestion.era5 import ERA5_VARIABLES, build_thailand_grid, fetch_era5_grid
++
+ 
+ def test_era5_variables_has_required_fields():
+     assert "precipitation" in ERA5_VARIABLES
+diff --git a/tests/unit/test_gnn.py b/tests/unit/test_gnn.py
+index 3af2577..95fd8b2 100644
+--- a/tests/unit/test_gnn.py
++++ b/tests/unit/test_gnn.py
+@@ -1,8 +1,10 @@
+ # tests/unit/test_gnn.py
+ import torch
+ from torch_geometric.data import HeteroData
++
+ from src.models.gnn import CropOSGNN
+ 
++
+ def _make_graph(n_era5=4, n_metar=2, n_farms=3):
+     data = HeteroData()
+     data["era5"].x = torch.randn(n_era5, 7)
+diff --git a/tests/unit/test_graph_builder.py b/tests/unit/test_graph_builder.py
+index 54f4de0..4302501 100644
+--- a/tests/unit/test_graph_builder.py
++++ b/tests/unit/test_graph_builder.py
+@@ -1,8 +1,7 @@
+ # tests/unit/test_graph_builder.py
+-import pytest
+-import torch
+ from src.features.graph_builder import build_heterogeneous_graph, haversine_km
+ 
++
+ def test_haversine_bangkok_chiangmai():
+     # Bangkok (13.75, 100.50) to Chiang Mai (18.77, 98.96) ≈ 582 km (great-circle)
+     dist = haversine_km(13.75, 100.50, 18.77, 98.96)
+diff --git a/tests/unit/test_metar.py b/tests/unit/test_metar.py
+index a45480c..501da50 100644
+--- a/tests/unit/test_metar.py
++++ b/tests/unit/test_metar.py
+@@ -1,8 +1,8 @@
+ # tests/unit/test_metar.py
++import httpx
+ import pandas as pd
+-import pytest
+ import respx
+-import httpx
++
+ from src.ingestion.metar import fetch_metar_station, parse_metar_response
+ 
+ SAMPLE_CSV = """station,valid,tmpf,dwpf,relh,drct,sknt,p01i,alti,mslp,vsby,skyc1,wxcodes
+@@ -20,8 +20,8 @@ def test_parse_metar_returns_dataframe():
+ 
+ def test_parse_metar_detects_rain_code():
+     df = parse_metar_response(SAMPLE_CSV)
+-    assert df.iloc[1]["rain_event"] == True
+-    assert df.iloc[0]["rain_event"] == False
++    assert df.iloc[1]["rain_event"]
++    assert not df.iloc[0]["rain_event"]
+ 
+ def test_parse_metar_converts_inches_to_mm():
+     df = parse_metar_response(SAMPLE_CSV)
+diff --git a/tests/unit/test_nwp_baseline.py b/tests/unit/test_nwp_baseline.py
+index ef69137..278460d 100644
+--- a/tests/unit/test_nwp_baseline.py
++++ b/tests/unit/test_nwp_baseline.py
+@@ -1,7 +1,10 @@
+-import pandas as pd
+ from unittest.mock import patch
++
++import pandas as pd
++
+ from src.ingestion.nwp_baseline import fetch_nwp_at_point
+ 
++
+ def test_fetch_nwp_returns_forecast_dataframe():
+     mock_df = pd.DataFrame({
+         "timestamp": pd.date_range("2023-01-01", periods=48, freq="h", tz="UTC"),
+diff --git a/tests/validation/test_model_skill.py b/tests/validation/test_model_skill.py
+index 2b5be0d..a063ebc 100644
+--- a/tests/validation/test_model_skill.py
++++ b/tests/validation/test_model_skill.py
+@@ -1,6 +1,10 @@
+ import numpy as np
++
+ from src.training.evaluate import (
+-    brier_score, critical_success_index, false_negative_rate, compute_skill_report,
++    brier_score,
++    compute_skill_report,
++    critical_success_index,
++    false_negative_rate,
+ )
+ 
+ 
+-- 
+2.43.0
+

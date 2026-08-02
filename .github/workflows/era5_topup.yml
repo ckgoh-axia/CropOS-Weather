@@ -1,5 +1,16 @@
 name: ERA5 Top-up (download missing northern grid)
 
+<<<<<<< ours
+=======
+# Downloads only the ERA5 grid points absent from era5_thailand.parquet on HF
+# (lat > ~12°N — covers Bangkok, Chiang Mai, and all northern/NE stations).
+# Saves result as era5_north.parquet and pushes to HF.
+# Safe to re-run: if all points are already present it exits immediately.
+#
+# Run after this completes:
+#   NWP forward-fill workflow  →  nwp_features.parquet (fills hourly null gaps)
+
+>>>>>>> theirs
 on:
   workflow_dispatch:
     inputs:
@@ -16,17 +27,32 @@ jobs:
   era5-topup:
     runs-on: ubuntu-latest
     timeout-minutes: 360
+<<<<<<< ours
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+=======
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+>>>>>>> theirs
       - name: Install dependencies
         run: |
           pip install \
             openmeteo-requests requests-cache retry-requests \
             pandas numpy pyarrow pyyaml \
             huggingface-hub
+<<<<<<< ours
+=======
+
+>>>>>>> theirs
       - name: Download missing ERA5 grid points → era5_north.parquet
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}

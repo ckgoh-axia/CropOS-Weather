@@ -9,14 +9,20 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+<<<<<<< ours
 import pytest
+=======
+>>>>>>> theirs
 import torch
 from torch_geometric.data import HeteroData
 
 from src.features.dataset import CropOSDataset, _build_era5_label_df, _filter_era5_by_radius
 from src.features.engineer import ERA5_SURFACE_VARS
 
+<<<<<<< ours
 
+=======
+>>>>>>> theirs
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 STATION_COORDS = {
@@ -37,7 +43,11 @@ def _make_era5_df(n_hours: int = N_HOURS, n_pts: int = 6) -> pd.DataFrame:
     rng = np.random.default_rng(0)
     rows = []
     for ts in timestamps:
+<<<<<<< ours
         for lat, lon in zip(lats, lons):
+=======
+        for lat, lon in zip(lats, lons, strict=True):
+>>>>>>> theirs
             row: dict = {"timestamp": ts, "lat": lat, "lon": lon}
             for var in ERA5_SURFACE_VARS:
                 row[var] = float(rng.uniform(0, 5))

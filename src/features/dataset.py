@@ -38,10 +38,14 @@ from torch.utils.data import Dataset
 from torch_geometric.data import HeteroData
 
 from src.features.engineer import (
+<<<<<<< ours
     ERA5_FEATURE_NAMES,
     add_temporal_features,
     prepare_era5_features,
     prepare_nwp_features,
+=======
+    prepare_era5_features,
+>>>>>>> theirs
 )
 from src.features.graph_builder import build_heterogeneous_graph, haversine_km
 
@@ -68,7 +72,11 @@ def _filter_era5_by_radius(
     keep_mask = pd.Series(False, index=unique_pts.index)
     for _, (s_lat, s_lon) in station_coords.items():
         d = unique_pts.apply(
+<<<<<<< ours
             lambda r: haversine_km(r["lat"], r["lon"], s_lat, s_lon), axis=1
+=======
+            lambda r, _lat=s_lat, _lon=s_lon: haversine_km(r["lat"], r["lon"], _lat, _lon), axis=1
+>>>>>>> theirs
         )
         keep_mask |= d <= radius_km
 
@@ -262,7 +270,10 @@ class CropOSDataset(Dataset):
         )
         # Keep only timestamps for which ALL future label timestamps exist
         label_ts = set(label_df.index.get_level_values("timestamp"))
+<<<<<<< ours
         max_h = pd.Timedelta(hours=max(horizons_h))
+=======
+>>>>>>> theirs
         valid_ts: list[pd.Timestamp] = []
         for ts in common_ts:
             if all(ts + pd.Timedelta(hours=h) in label_ts for h in horizons_h):

@@ -77,7 +77,11 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
         era5_north = data_dir / "era5_north.parquet"
         era5_north_path = era5_north if era5_north.exists() else None
         if era5_north_path:
+<<<<<<< ours
             logger.info(f"Found era5_north.parquet — northern grid will be merged")
+=======
+            logger.info("Found era5_north.parquet — northern grid will be merged")
+>>>>>>> theirs
 
         train_ds = load_dataset_from_parquets(
             era5_path=data_dir / "era5_thailand.parquet",
@@ -161,22 +165,47 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
     # NWP scaler — build sample from first 500 training timestamps
     nwp_scaler = FeatureScaler()
     nwp_sample = pd.DataFrame(
+<<<<<<< ours
         np.concatenate([train_ds._nwp_by_ts[ts] for ts in sample_ts if ts in train_ds._nwp_by_ts], axis=0),
+=======
+        np.concatenate(
+            [train_ds._nwp_by_ts[ts] for ts in sample_ts if ts in train_ds._nwp_by_ts],
+            axis=0,
+        ),
+>>>>>>> theirs
         columns=train_ds.nwp_feature_cols,
     )
     nwp_scaler.fit(nwp_sample, train_ds.nwp_feature_cols)
     nwp_scaler.save("checkpoints/nwp_scaler.npz")
 
     # Apply ERA5 scaler to BOTH train and val lookup dicts
+<<<<<<< ours
     era5_mean = np.array([era5_scaler._means[c] for c in train_ds.era5_feature_cols], dtype=np.float32)
     era5_std  = np.array([era5_scaler._stds[c]  for c in train_ds.era5_feature_cols], dtype=np.float32)
+=======
+    era5_mean = np.array(
+        [era5_scaler._means[c] for c in train_ds.era5_feature_cols], dtype=np.float32
+    )
+    era5_std = np.array(
+        [era5_scaler._stds[c] for c in train_ds.era5_feature_cols], dtype=np.float32
+    )
+>>>>>>> theirs
     for ds in (train_ds, val_ds):
         for ts in ds._era5_by_ts:
             ds._era5_by_ts[ts] = (ds._era5_by_ts[ts] - era5_mean) / era5_std
 
     # Apply NWP scaler to BOTH train and val lookup dicts
+<<<<<<< ours
     nwp_mean = np.array([nwp_scaler._means[c] for c in train_ds.nwp_feature_cols], dtype=np.float32)
     nwp_std  = np.array([nwp_scaler._stds[c]  for c in train_ds.nwp_feature_cols], dtype=np.float32)
+=======
+    nwp_mean = np.array(
+        [nwp_scaler._means[c] for c in train_ds.nwp_feature_cols], dtype=np.float32
+    )
+    nwp_std = np.array(
+        [nwp_scaler._stds[c] for c in train_ds.nwp_feature_cols], dtype=np.float32
+    )
+>>>>>>> theirs
     for ds in (train_ds, val_ds):
         for ts in ds._nwp_by_ts:
             ds._nwp_by_ts[ts] = (ds._nwp_by_ts[ts] - nwp_mean) / nwp_std
