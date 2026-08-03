@@ -29,7 +29,7 @@ jobs:
           runpod.api_key = os.environ["RUNPOD_API_KEY"]
           pod = runpod.create_pod(
               name="cropos-training",
-              image_name="runpod/pytorch:2.2.0-py3.11-cuda12.1-devel",
+              image_name="runpod/pytorch:2.2.1-py3.10-cuda12.1.1-devel-ubuntu22.04",
               gpu_type_id="NVIDIA GeForce RTX 4090",
               cloud_type="COMMUNITY",
               docker_args=(
