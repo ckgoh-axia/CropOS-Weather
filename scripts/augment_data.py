@@ -322,40 +322,41 @@ def topup_era5(
     identify missing points without loading ~3 GB into RAM.
     """
     import pyarrow.parquet as pq
-    from src.ingestion.era5 import fetch_era5_grid, build_thailand_grid
+
+    from src.ingestion.era5 import build_thailand_grid, fetch_era5_grid
 
     outdir = Path("data/raw")
     outdir.mkdir(parents=True, exist_ok=True)
 
     # ── Step 1: identify existing grid points (lat/lon columns only) ──────────
+    # Use HfFileSystem to read lat/lon directly over HF's API without downloading
+    # the full ~3 GB parquet to disk.  hf_hub_download always fetches the entire
+    # file first — on a GitHub Actions runner that times out or fills the disk.
     if repo_id and token and not skip_push:
-        logger.info("ERA5-TOPUP | downloading era5_thailand.parquet from HF (lat/lon only)...")
-        local_path = Path(hf_hub_download(
-            repo_id=repo_id,
-            filename="era5_thailand.parquet",
-            repo_type="dataset",
-            token=token,
-            local_dir=str(outdir),
-        ))
+        from huggingface_hub import HfFileSystem
+        logger.info(
+            "ERA5-TOPUP | reading lat/lon from HF parquet via streaming (no full download)..."
+        )
+        fs = HfFileSystem(token=token)
+        hf_path = f"datasets/{repo_id}/era5_thailand.parquet"
+        tbl = pq.read_table(hf_path, columns=["lat", "lon"], filesystem=fs)
     else:
         local_path = outdir / "era5_thailand.parquet"
         if not local_path.exists():
             raise FileNotFoundError(
                 f"No local ERA5 file at {local_path} — pass --skip-push only with local data"
             )
-
-    # Read only lat/lon — avoids loading the full ~3 GB into RAM
-    tbl = pq.read_table(local_path, columns=["lat", "lon"])
+        tbl = pq.read_table(local_path, columns=["lat", "lon"])
     meta_df = tbl.to_pandas()
     existing_pts = set(
-        zip(meta_df["lat"].round(2).tolist(), meta_df["lon"].round(2).tolist())
+        zip(meta_df["lat"].round(2).tolist(), meta_df["lon"].round(2).tolist(), strict=True)
     )
     logger.info(f"ERA5-TOPUP | existing: {len(existing_pts):,} unique grid points")
     del meta_df, tbl
 
     # ── Step 2: identify missing grid points from the full Thailand grid ──────
     all_lats, all_lons = build_thailand_grid(spacing_deg=0.25)
-    all_pts = [(round(lat, 2), round(lon, 2)) for lat, lon in zip(all_lats, all_lons)]
+    all_pts = [(round(lat, 2), round(lon, 2)) for lat, lon in zip(all_lats, all_lons, strict=True)]
     missing = [(lat, lon) for lat, lon in all_pts if (lat, lon) not in existing_pts]
     logger.info(
         f"ERA5-TOPUP | full grid: {len(all_pts):,}  "
@@ -600,16 +601,32 @@ def main() -> None:
     parser.add_argument("--config", default="configs/data.yaml")
     parser.add_argument("--start", default=None)
     parser.add_argument("--end", default=None)
-    parser.add_argument("--era5-only", action="store_true", help="Only run ERA5 continuation (checkpoint-based)")
-    parser.add_argument("--era5-topup", action="store_true", help="Download only ERA5 grid points missing from HF → era5_north.parquet")
-    parser.add_argument("--metar-only", action="store_true", help="Only run METAR missing-station fill")
-    parser.add_argument("--nwp-only", action="store_true", help="Only run NWP features download")
-    parser.add_argument("--nwp-ffill", action="store_true", help="Forward-fill hourly NWP nulls and re-push to HF")
-    parser.add_argument("--skip-push", action="store_true", help="Skip HuggingFace upload (local run)")
+    parser.add_argument(
+        "--era5-only", action="store_true", help="Only run ERA5 continuation (checkpoint-based)"
+    )
+    parser.add_argument(
+        "--era5-topup", action="store_true",
+        help="Download only ERA5 grid points missing from HF → era5_north.parquet",
+    )
+    parser.add_argument(
+        "--metar-only", action="store_true", help="Only run METAR missing-station fill"
+    )
+    parser.add_argument(
+        "--nwp-only", action="store_true", help="Only run NWP features download"
+    )
+    parser.add_argument(
+        "--nwp-ffill", action="store_true",
+        help="Forward-fill hourly NWP nulls and re-push to HF",
+    )
+    parser.add_argument(
+        "--skip-push", action="store_true", help="Skip HuggingFace upload (local run)"
+    )
     args = parser.parse_args()
 
     # Validate mutual exclusivity of --*-only / --*-topup / --*-ffill flags
-    only_flags = [args.era5_only, args.era5_topup, args.metar_only, args.nwp_only, args.nwp_ffill]
+    only_flags = [
+        args.era5_only, args.era5_topup, args.metar_only, args.nwp_only, args.nwp_ffill,
+    ]
     if sum(only_flags) > 1:
         raise ValueError("Only one mode flag may be set at a time")
 
@@ -635,7 +652,9 @@ def main() -> None:
     else:
         repo_id = None
 
-    any_specific = args.era5_only or args.era5_topup or args.metar_only or args.nwp_only or args.nwp_ffill
+    any_specific = (
+        args.era5_only or args.era5_topup or args.metar_only or args.nwp_only or args.nwp_ffill
+    )
 
     if args.era5_topup:
         logger.info("═══ ERA5 top-up (missing grid points → era5_north.parquet) ═══")
