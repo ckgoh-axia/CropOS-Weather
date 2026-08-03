@@ -290,7 +290,9 @@ def continue_era5(
         hf_token=token if not skip_push else None,
     )
 
-    if not skip_push:
+    if era5_path is None:
+        logger.info("ERA5-AUG | partial run — no final parquet to push (checkpoint already on HF)")
+    elif not skip_push:
         push_to_hf(era5_path, repo_id, token)
         logger.info("ERA5-AUG | final parquet pushed to HF ✓")
     else:

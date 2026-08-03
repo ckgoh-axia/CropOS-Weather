@@ -193,9 +193,28 @@ def download_era5(
         logger.info("ERA5 | partial run complete — exiting cleanly, no final parquet written")
         return None
 
+    # Assemble final parquet from checkpoint files using PyArrow streaming.
+    # Avoids loading all ~140M rows into pandas RAM at once (OOM on 7 GB runner).
+    import pyarrow.parquet as pq
+    import pyarrow as pa
+
+    batch_files = sorted(checkpoint_dir.glob("batch_*.parquet"))
+    if not batch_files:
+        logger.error("ERA5 | all batches complete but no checkpoint files found — cannot assemble")
+        return None
+
     path = outdir / "era5_thailand.parquet"
-    era5_df.to_parquet(path, index=False)
-    logger.info(f"ERA5 | {len(era5_df):,} rows → {path}")
+    logger.info(f"ERA5 | assembling {len(batch_files)} batch files → {path} (PyArrow streaming)")
+
+    # Read schema from first file, then stream-write all batches
+    schema = pq.read_schema(batch_files[0])
+    with pq.ParquetWriter(str(path), schema) as writer:
+        for bf in batch_files:
+            table = pq.read_table(bf)
+            writer.write_table(table)
+
+    final_rows = pq.read_metadata(path).num_rows
+    logger.info(f"ERA5 | {final_rows:,} rows → {path}")
     return path
 
 
