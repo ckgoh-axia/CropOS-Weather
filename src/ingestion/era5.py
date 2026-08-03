@@ -36,12 +36,22 @@ logger = logging.getLogger(__name__)
 
 
 class Era5PartialDownload(RuntimeError):
-    """Raised by fetch_era5_grid when the run ends before all batches are done.
+    """Raised by fetch_era5_grid when the run ends before all batches are done,
+    OR when all batches are done and the caller must assemble the final parquet.
+
+    is_complete=False (default): run ended early — checkpoint pushed, exit cleanly,
+                                 no assembly needed.
+    is_complete=True:            all batches complete — caller must assemble from
+                                 the per-batch checkpoint files via PyArrow streaming.
+                                 We do NOT assemble here to avoid the ~5.5 GB pd.concat
+                                 peak that OOMs the 7 GB GitHub Actions runner.
 
     This is not an error — checkpoints for completed batches have been saved.
-    Callers should skip the expensive final-assembly step and exit cleanly so
-    the next cron run can resume from the checkpoint without OOM risk.
     """
+
+    def __init__(self, msg: str, is_complete: bool = False) -> None:
+        super().__init__(msg)
+        self.is_complete = is_complete
 
 
 ERA5_VARIABLES = [
@@ -209,13 +219,20 @@ def fetch_era5_grid(
                 f"ERA5: {done_count}/{n_batches} batches done — "
                 f"checkpoint saved, re-run to continue"
             )
-        # All batches complete — assemble the full dataset once.
-        # Peak RAM here = total checkpoint size (~28 MB × n_batches ≈ 5.5 GB),
-        # but this only runs on the final run, not on every intermediate cron run.
-        logger.info(f"ERA5 | all {n_batches} batches complete — assembling final dataset")
-        result = pd.concat(
-            [pd.read_parquet(f) for f in batch_files],
-            ignore_index=True,
+        # All batches complete — do NOT assemble via pd.concat here.
+        # Loading all ~140M rows into a list of DataFrames and then concatenating
+        # peaks at ~5.5 GB RAM (plus a temporary copy during concat) and reliably
+        # OOMs the 7 GB GitHub Actions runner.  Instead we raise Era5PartialDownload
+        # with is_complete=True so the caller (download_data.py / augment_data.py)
+        # can assemble the final parquet via PyArrow streaming, which keeps peak
+        # RAM to one batch (~28 MB) at a time regardless of total dataset size.
+        logger.info(
+            f"ERA5 | all {n_batches} batches complete — signalling caller to "
+            f"assemble {len(batch_files)} checkpoint files via PyArrow streaming"
+        )
+        raise Era5PartialDownload(
+            f"ERA5: all {n_batches} batches done — assemble from checkpoint files",
+            is_complete=True,
         )
     else:
         # No-checkpoint path (unit tests only — small mock data, no OOM risk).

@@ -151,21 +151,21 @@ def download_era5(
     # the NEW ones afterwards.
     pre_existing = set(checkpoint_dir.glob("batch_*.parquet")) if checkpoint_dir.exists() else set()
 
-    era5_df = None
     partial = False
     try:
-        era5_df = fetch_era5_grid(
+        fetch_era5_grid(
             lat_pts, lon_pts, start, end,
             checkpoint_dir=checkpoint_dir,
             max_new_batches=_ERA5_MAX_BATCHES_PER_RUN,
         )
     except Era5PartialDownload as exc:
-        # Not an error — the run hit the rate limit or max_new_batches cap.
-        # Checkpoints for completed batches are already on disk; the finally
-        # block below pushes them to HF.  We return None to tell the caller
-        # to skip the (OOM-risky) final parquet assembly.
+        # Two sub-cases:
+        #   is_complete=False — run hit rate limit / max_new_batches.  Exit cleanly;
+        #                       no assembly needed this run.
+        #   is_complete=True  — all batches done.  Fall through to the PyArrow
+        #                       streaming assembly below (partial=False).
         logger.info(f"ERA5 | {exc}")
-        partial = True
+        partial = not exc.is_complete
     finally:
         # Push newly downloaded batch files to HF.  This runs even on partial
         # runs and even if fetch_era5_grid raises an unexpected exception.
@@ -196,7 +196,6 @@ def download_era5(
     # Assemble final parquet from checkpoint files using PyArrow streaming.
     # Avoids loading all ~140M rows into pandas RAM at once (OOM on 7 GB runner).
     import pyarrow.parquet as pq
-    import pyarrow as pa
 
     batch_files = sorted(checkpoint_dir.glob("batch_*.parquet"))
     if not batch_files:
