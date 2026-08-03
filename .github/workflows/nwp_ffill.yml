@@ -1,14 +1,11 @@
 name: NWP Forward-fill (fix hourly null gaps)
 
-<<<<<<< ours
-=======
 # The NWP parquet has ~75% null rows because GFS runs 4-6x/day but the
 # timestamp index is hourly. This workflow forward-fills each GFS value
 # until the next run — exactly what operational NWP systems do.
 # Re-uploads nwp_features.parquet to HF (overwrites in place, ~10 MB).
 # Safe to re-run: idempotent after the first run (already-filled rows stay filled).
 
->>>>>>> theirs
 on:
   workflow_dispatch:
 
@@ -16,13 +13,6 @@ jobs:
   nwp-ffill:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-<<<<<<< ours
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-=======
 
     steps:
       - uses: actions/checkout@v4
@@ -31,23 +21,15 @@ jobs:
         with:
           python-version: "3.11"
 
->>>>>>> theirs
       - name: Install dependencies
         run: |
           pip install \
             pandas numpy pyarrow pyyaml \
             huggingface-hub
-<<<<<<< ours
-=======
 
->>>>>>> theirs
       - name: Forward-fill NWP nulls and push to HF
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           PYTHONPATH: ${{ github.workspace }}
-<<<<<<< ours
-        run: python scripts/augment_data.py --nwp-ffill
-=======
         run: |
           python scripts/augment_data.py --nwp-ffill
->>>>>>> theirs
