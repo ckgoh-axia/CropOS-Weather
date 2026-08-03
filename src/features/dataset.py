@@ -459,6 +459,7 @@ def load_dataset_from_hf(
             filename=filename,
             repo_type="dataset",
             token=hf_token,
+            revision="main",
             cache_dir=str(cache_dir) if cache_dir else None,
         ))
 
