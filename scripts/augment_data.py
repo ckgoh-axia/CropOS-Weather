@@ -311,56 +311,82 @@ def topup_era5(
     token: str | None,
     skip_push: bool,
 ) -> None:
-    """Download only ERA5 grid points missing from era5_thailand.parquet on HF.
+    """Download only ERA5 grid points missing from the HF batch checkpoints.
+
+    Coverage is determined by which era5_batches/batch_NNNN.parquet files exist
+    on HF — NOT by reading the assembled era5_thailand.parquet (which is ~3 GB
+    and causes SIGTERM on the GitHub Actions runner even with column projection).
+
+    Batch index → grid points mapping mirrors fetch_era5_grid()'s loop exactly:
+      batch i covers all_pts[i*BATCH_SIZE : (i+1)*BATCH_SIZE]
 
     Saves result as era5_north.parquet (separate file — not merged with the
-    existing parquet). Merging a ~3 GB parquet on a 7 GB runner risks OOM;
-    instead, dataset.py concatenates both files at load time using only the
-    grid points within edge_radius_km of any station.
-
-    Uses pyarrow to read only lat/lon columns from the existing parquet so we
-    identify missing points without loading ~3 GB into RAM.
+    existing parquet). dataset.py concatenates both files at load time using
+    only the grid points within edge_radius_km of any station.
     """
-    import pyarrow.parquet as pq
-
-    from src.ingestion.era5 import build_thailand_grid, fetch_era5_grid
+    from src.ingestion.era5 import BATCH_SIZE, build_thailand_grid, fetch_era5_grid
 
     outdir = Path("data/raw")
     outdir.mkdir(parents=True, exist_ok=True)
 
-    # ── Step 1: identify existing grid points (lat/lon columns only) ──────────
-    # Use HfFileSystem to read lat/lon directly over HF's API without downloading
-    # the full ~3 GB parquet to disk.  hf_hub_download always fetches the entire
-    # file first — on a GitHub Actions runner that times out or fills the disk.
-    if repo_id and token and not skip_push:
-        from huggingface_hub import HfFileSystem
-        logger.info(
-            "ERA5-TOPUP | reading lat/lon from HF parquet via streaming (no full download)..."
-        )
-        fs = HfFileSystem(token=token)
-        hf_path = f"datasets/{repo_id}/era5_thailand.parquet"
-        tbl = pq.read_table(hf_path, columns=["lat", "lon"], filesystem=fs)
-    else:
-        local_path = outdir / "era5_thailand.parquet"
-        if not local_path.exists():
-            raise FileNotFoundError(
-                f"No local ERA5 file at {local_path} — pass --skip-push only with local data"
-            )
-        tbl = pq.read_table(local_path, columns=["lat", "lon"])
-    meta_df = tbl.to_pandas()
-    existing_pts = set(
-        zip(meta_df["lat"].round(2).tolist(), meta_df["lon"].round(2).tolist(), strict=True)
-    )
-    logger.info(f"ERA5-TOPUP | existing: {len(existing_pts):,} unique grid points")
-    del meta_df, tbl
-
-    # ── Step 2: identify missing grid points from the full Thailand grid ──────
+    # ── Step 1: identify covered batches from HF file listing (no downloads) ──
     all_lats, all_lons = build_thailand_grid(spacing_deg=0.25)
-    all_pts = [(round(lat, 2), round(lon, 2)) for lat, lon in zip(all_lats, all_lons, strict=True)]
-    missing = [(lat, lon) for lat, lon in all_pts if (lat, lon) not in existing_pts]
+    all_pts = [
+        (round(lat, 2), round(lon, 2))
+        for lat, lon in zip(all_lats, all_lons, strict=True)
+    ]
+    n_batches = (len(all_pts) + BATCH_SIZE - 1) // BATCH_SIZE
+
+    if repo_id and token and not skip_push:
+        from huggingface_hub import HfApi
+        api = HfApi()
+        logger.info("ERA5-TOPUP | listing HF batch checkpoint files (no parquet downloads)...")
+        try:
+            repo_files = list(api.list_repo_files(
+                repo_id=repo_id, repo_type="dataset", token=token,
+            ))
+        except Exception as exc:
+            logger.warning(f"ERA5-TOPUP | could not list HF files: {exc} — assuming 0 done")
+            repo_files = []
+
+        done_indices: set[int] = set()
+        for f in repo_files:
+            # era5_batches/batch_0000.parquet → index 0
+            if f.startswith("era5_batches/batch_") and f.endswith(".parquet"):
+                try:
+                    idx = int(Path(f).stem.split("_")[1])
+                    done_indices.add(idx)
+                except (ValueError, IndexError):
+                    pass
+        logger.info(
+            f"ERA5-TOPUP | {len(done_indices)}/{n_batches} batches complete on HF"
+        )
+    else:
+        # Local run: check local checkpoint dir
+        checkpoint_dir = outdir / ".era5_checkpoint"
+        done_indices = set()
+        if checkpoint_dir.exists():
+            for f in checkpoint_dir.glob("batch_*.parquet"):
+                try:
+                    idx = int(f.stem.split("_")[1])
+                    done_indices.add(idx)
+                except (ValueError, IndexError):
+                    pass
+        logger.info(
+            f"ERA5-TOPUP | {len(done_indices)}/{n_batches} batches complete locally"
+        )
+
+    # ── Step 2: derive missing grid points from uncovered batches ─────────────
+    covered_pts: set[tuple[float, float]] = set()
+    for idx in done_indices:
+        start_i = idx * BATCH_SIZE
+        for pt in all_pts[start_i: start_i + BATCH_SIZE]:
+            covered_pts.add(pt)
+
+    missing = [(lat, lon) for lat, lon in all_pts if (lat, lon) not in covered_pts]
     logger.info(
         f"ERA5-TOPUP | full grid: {len(all_pts):,}  "
-        f"already downloaded: {len(existing_pts):,}  "
+        f"covered: {len(covered_pts):,}  "
         f"missing: {len(missing):,}"
     )
 
