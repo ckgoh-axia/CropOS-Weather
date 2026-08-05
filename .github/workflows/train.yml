@@ -21,12 +21,16 @@ jobs:
         env:
           RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
         run: |
           pip install runpod -q
           python - <<'PYEOF'
           import runpod, os
+
           runpod.api_key = os.environ["RUNPOD_API_KEY"]
+
+          # Try GPUs in order of preference — community cloud availability varies.
+          # All have ≥16 GB VRAM which is sufficient for the 128-hidden GNN.
           GPU_CANDIDATES = [
               ("NVIDIA GeForce RTX 4090", "COMMUNITY"),
               ("NVIDIA GeForce RTX 3090", "COMMUNITY"),
@@ -35,6 +39,7 @@ jobs:
               ("NVIDIA GeForce RTX 4090", "SECURE"),
               ("NVIDIA A100 80GB PCIe",   "SECURE"),
           ]
+
           common_kwargs = dict(
               name="cropos-training",
               image_name="runpod/pytorch:2.2.1-py3.10-cuda12.1.1-devel-ubuntu22.04",
@@ -44,20 +49,29 @@ jobs:
               ),
               env={
                   "HF_TOKEN": os.environ["HF_TOKEN"],
-                  "MLFLOW_TRACKING_URI": os.environ.get("MLFLOW_TRACKING_URI", ""),
+                  "WANDB_API_KEY": os.environ["WANDB_API_KEY"],
               },
               volume_in_gb=50,
               container_disk_in_gb=20,
           )
+
           pod = None
           for gpu_type, cloud_type in GPU_CANDIDATES:
               try:
                   print(f"Trying {gpu_type} ({cloud_type})...")
-                  pod = runpod.create_pod(gpu_type_id=gpu_type, cloud_type=cloud_type, **common_kwargs)
+                  pod = runpod.create_pod(
+                      gpu_type_id=gpu_type,
+                      cloud_type=cloud_type,
+                      **common_kwargs,
+                  )
                   print(f"✓ Pod launched on {gpu_type} ({cloud_type}): {pod['id']}")
                   break
               except Exception as exc:
                   print(f"  unavailable: {exc}")
+
           if pod is None:
-              raise RuntimeError("No GPU available across all candidates. Try again later.")
+              raise RuntimeError(
+                  "No GPU available across all candidates. "
+                  "Try again later or add more GPU types to the list."
+              )
           PYEOF

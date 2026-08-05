@@ -8,7 +8,7 @@ apt-get install -y git -q
 git clone https://github.com/ckgoh-axia/CropOS-Weather.git /workspace/cropos
 cd /workspace/cropos
 
-pip install poetry -q
+pip install poetry wandb -q
 poetry install --no-root -q
 
 # Pull training data from HuggingFace Datasets

@@ -1,4 +1,4 @@
-"""Training loop for CropOSGNN with MLflow tracking.
+"""Training loop for CropOSGNN with W&B tracking.
 
 Run
 ---
@@ -10,7 +10,7 @@ Environment variables
 ---------------------
     HF_TOKEN            — HuggingFace read token (required unless --local)
     HF_DATASET_REPO     — Override auto-detected repo id
-    MLFLOW_TRACKING_URI — MLflow backend (default: local mlruns/)
+    WANDB_API_KEY       — Weights & Biases API key
 """
 from __future__ import annotations
 
@@ -19,8 +19,7 @@ import logging
 import os
 from pathlib import Path
 
-import mlflow
-import mlflow.pytorch
+import wandb
 import numpy as np
 import torch
 import yaml
@@ -230,80 +229,80 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
     )
     gradient_clip = tcfg.get("gradient_clip", 1.0)
 
-    # ── MLflow run ────────────────────────────────────────────────────────────
-    mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI", "mlruns"))
-    mlflow.set_experiment("cropos-gnn-thai")
+    # ── W&B run ───────────────────────────────────────────────────────────────
+    wandb.init(
+        project="cropos-gnn-thai",
+        config={
+            "era5_in":                 era5_in,
+            "local_station_in":        station_in,
+            "hidden":                  gnn_cfg["hidden_channels"],
+            "num_layers":              gnn_cfg["num_layers"],
+            "lr":                      tcfg["learning_rate"],
+            "batch_size":              tcfg["batch_size"],
+            "era5_radius_km":          era5_node_radius_km,
+            "loss":                    "brier_csi",
+            "device":                  str(device),
+            "epochs":                  tcfg["epochs"],
+            "early_stopping_patience": tcfg["early_stopping_patience"],
+        },
+    )
 
-    with mlflow.start_run():
-        mlflow.log_params({
-            "era5_in":           era5_in,
-            "local_station_in":  station_in,
-            "hidden":            gnn_cfg["hidden_channels"],
-            "num_layers":        gnn_cfg["num_layers"],
-            "lr":                tcfg["learning_rate"],
-            "batch_size":        tcfg["batch_size"],
-            "era5_radius_km":    era5_node_radius_km,
-            "loss":              "brier_csi",
-            "device":            str(device),
-        })
+    best_val_loss = float("inf")
+    patience_counter = 0
 
-        best_val_loss = float("inf")
-        patience_counter = 0
+    for epoch in range(tcfg["epochs"]):
+        # ── train ─────────────────────────────────────────────────────
+        model.train()
+        train_loss_sum = 0.0
+        train_batches = 0
+        for batch in train_loader:
+            batch = batch.to(device)
+            optimizer.zero_grad()
+            preds = model(batch)          # (n_farms_in_batch, n_horizons)
+            labels = batch["farm"].y      # same shape
+            loss = criterion(preds, labels)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
+            optimizer.step()
+            train_loss_sum += float(loss)
+            train_batches += 1
 
-        for epoch in range(tcfg["epochs"]):
-            # ── train ─────────────────────────────────────────────────────
-            model.train()
-            train_loss_sum = 0.0
-            train_batches = 0
-            for batch in train_loader:
+        train_loss = train_loss_sum / max(train_batches, 1)
+
+        # ── validate ──────────────────────────────────────────────────
+        model.eval()
+        val_loss_sum = 0.0
+        val_batches = 0
+        with torch.no_grad():
+            for batch in val_loader:
                 batch = batch.to(device)
-                optimizer.zero_grad()
-                preds = model(batch)          # (n_farms_in_batch, n_horizons)
-                labels = batch["farm"].y      # same shape
+                preds = model(batch)
+                labels = batch["farm"].y
                 loss = criterion(preds, labels)
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
-                optimizer.step()
-                train_loss_sum += float(loss)
-                train_batches += 1
+                val_loss_sum += float(loss)
+                val_batches += 1
 
-            train_loss = train_loss_sum / max(train_batches, 1)
+        val_loss = val_loss_sum / max(val_batches, 1)
 
-            # ── validate ──────────────────────────────────────────────────
-            model.eval()
-            val_loss_sum = 0.0
-            val_batches = 0
-            with torch.no_grad():
-                for batch in val_loader:
-                    batch = batch.to(device)
-                    preds = model(batch)
-                    labels = batch["farm"].y
-                    loss = criterion(preds, labels)
-                    val_loss_sum += float(loss)
-                    val_batches += 1
+        wandb.log({"train_loss": train_loss, "val_loss": val_loss, "epoch": epoch})
+        logger.info(
+            f"Epoch {epoch:03d}: train={train_loss:.4f}  val={val_loss:.4f}"
+        )
 
-            val_loss = val_loss_sum / max(val_batches, 1)
+        # ── early stopping + checkpoint ───────────────────────────────
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            patience_counter = 0
+            torch.save(model.state_dict(), "checkpoints/best_model.pt")
+            wandb.save("checkpoints/best_model.pt")
+            logger.info(f"  ✓ new best val loss: {val_loss:.4f}")
+        else:
+            patience_counter += 1
+            if patience_counter >= tcfg["early_stopping_patience"]:
+                logger.info(f"Early stopping at epoch {epoch} (patience exhausted)")
+                break
 
-            mlflow.log_metrics(
-                {"train_loss": train_loss, "val_loss": val_loss}, step=epoch
-            )
-            logger.info(
-                f"Epoch {epoch:03d}: train={train_loss:.4f}  val={val_loss:.4f}"
-            )
-
-            # ── early stopping + checkpoint ───────────────────────────────
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                patience_counter = 0
-                torch.save(model.state_dict(), "checkpoints/best_model.pt")
-                mlflow.pytorch.log_model(model, "model")
-                logger.info(f"  ✓ new best val loss: {val_loss:.4f}")
-            else:
-                patience_counter += 1
-                if patience_counter >= tcfg["early_stopping_patience"]:
-                    logger.info(f"Early stopping at epoch {epoch} (patience exhausted)")
-                    break
-
+    wandb.finish()
     logger.info(f"Training complete. Best val loss: {best_val_loss:.4f}")
     logger.info("Model saved to checkpoints/best_model.pt")
     logger.info("Scalers saved to checkpoints/era5_scaler.npz")
