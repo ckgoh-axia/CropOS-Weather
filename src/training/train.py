@@ -19,9 +19,9 @@ import logging
 import os
 from pathlib import Path
 
-import wandb
 import numpy as np
 import torch
+import wandb
 import yaml
 from torch_geometric.loader import DataLoader
 
@@ -72,7 +72,7 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
                 f"Expected one of: {nwp_candidates}"
             )
 
-        # Include northern ERA5 top-up if present (adds grid points for Bangkok, north Thailand)
+        # Include northern ERA5 top-up if present
         era5_north = data_dir / "era5_north.parquet"
         era5_north_path = era5_north if era5_north.exists() else None
         if era5_north_path:
@@ -140,9 +140,6 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
     )
 
     # ── fit feature scalers on training data ──────────────────────────────────
-    # Scalers are fit on training set ONLY; saved so inference uses identical scaling.
-    # Applied in-place to both train and val lookup dicts so __getitem__ returns
-    # already-scaled tensors with no overhead per batch.
     logger.info("Fitting feature scalers on training data...")
     import pandas as pd
     Path("checkpoints").mkdir(exist_ok=True)
@@ -194,8 +191,8 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
     logger.info("Feature scalers fitted and applied to train + val")
 
     # ── model, optimizer, loss ────────────────────────────────────────────────
-    era5_in      = gnn_cfg.get("era5_in", len(ERA5_FEATURE_NAMES))
-    station_in   = gnn_cfg.get("local_station_in", 22)
+    era5_in    = gnn_cfg.get("era5_in", len(ERA5_FEATURE_NAMES))
+    station_in = gnn_cfg.get("local_station_in", 22)
 
     model = CropOSGNN(
         era5_in=era5_in,
@@ -258,8 +255,8 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
         for batch in train_loader:
             batch = batch.to(device)
             optimizer.zero_grad()
-            preds = model(batch)          # (n_farms_in_batch, n_horizons)
-            labels = batch["farm"].y      # same shape
+            preds = model(batch)
+            labels = batch["farm"].y
             loss = criterion(preds, labels)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
