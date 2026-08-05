@@ -5,6 +5,7 @@ set -e
 echo "=== CropOS Training — RunPod ==="
 apt-get install -y git -q
 
+rm -rf /workspace/cropos
 git clone https://github.com/ckgoh-axia/CropOS-Weather.git /workspace/cropos
 cd /workspace/cropos
 
