@@ -24,7 +24,7 @@ repo_id = f"{username}/cropos-data"
 outdir = Path("data/raw")
 outdir.mkdir(parents=True, exist_ok=True)
 
-for filename in ["era5_thailand.parquet", "metar_thai.parquet", "nwp_baseline.parquet"]:
+for filename in ["era5_thailand.parquet", "metar_thai.parquet", "nwp_features.parquet"]:
     hf_hub_download(
         repo_id=repo_id,
         filename=filename,
