@@ -9,8 +9,26 @@ rm -rf /workspace/cropos
 git clone https://github.com/ckgoh-axia/CropOS-Weather.git /workspace/cropos
 cd /workspace/cropos
 
-pip install poetry wandb -q
-poetry install --no-root -q
+# The RunPod image (py3.10) is incompatible with pyproject.toml's python = "^3.11",
+# so poetry install fails silently. Install deps directly via pip instead.
+# torch 2.2.1+cu121 is already present in the base image — skip reinstalling it.
+echo "=== Installing dependencies ==="
+pip install wandb -q
+
+# PyG wheels must come from the official index keyed to torch+cuda version
+pip install torch-geometric -q
+pip install torch-scatter torch-sparse torch-cluster \
+    -f https://data.pyg.org/whl/torch-2.2.0+cu121.html -q
+
+# Remaining project runtime deps
+pip install \
+    openmeteo-requests requests-cache retry-requests \
+    pandas numpy xarray scikit-learn \
+    fastapi uvicorn pydantic httpx \
+    python-dotenv "huggingface-hub>=0.21" pyarrow pyyaml tqdm \
+    -q
+
+echo "=== Dependencies installed ==="
 
 # Pull training data from HuggingFace Datasets
 python - <<'PYEOF'
