@@ -7,12 +7,20 @@ HuggingFace credentials are required.  The ERA5 radius is set to a large value
 """
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import torch
 from torch_geometric.data import HeteroData
 
-from src.features.dataset import CropOSDataset, _build_era5_label_df, _filter_era5_by_radius
+from src.features.dataset import (
+    CropOSDataset,
+    _build_era5_label_df,
+    _filter_era5_by_radius,
+    load_dataset_from_parquets,
+)
 from src.features.engineer import ERA5_SURFACE_VARS
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -222,11 +230,6 @@ def test_dataset_zero_threshold_mostly_rain():
 
 # ── load_dataset_from_parquets (extension paths) ──────────────────────────────
 
-import tempfile
-from pathlib import Path
-
-from src.features.dataset import load_dataset_from_parquets
-from src.features.engineer import ERA5_SURFACE_VARS
 
 
 def _write_parquet(df: pd.DataFrame, directory: str, name: str) -> Path:
