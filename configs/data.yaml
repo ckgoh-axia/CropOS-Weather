@@ -81,9 +81,14 @@ nwp_min_start: "2016-01-01"
 
 precipitation_label_source: era5  # ERA5 precipitation field; no NASA account required
 precipitation_label_threshold_mm: 1.0  # rain event if ERA5 precip >= 1mm in window
-training_start: "2015-01-01"
-training_end: "2022-12-31"
-validation_start: "2023-01-01"
-validation_end: "2023-12-31"
+# Training: 2016-2024 (aligns with NWP availability; includes era5_recent.parquet for 2023-2024)
+# Validation: 2025 — held-out year for model selection
+# Testing: 2026 — final evaluation on current-year data
+training_start: "2016-01-01"
+training_end: "2024-12-31"
+validation_start: "2025-01-01"
+validation_end: "2025-12-31"
+test_start: "2026-01-01"
+test_end: "2026-06-30"
 washoff_threshold_mm: 5.0
 forecast_horizons: [12, 24, 36, 48]

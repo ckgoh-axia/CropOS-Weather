@@ -1,0 +1,40 @@
+name: ERA5 Extend (2023-2026)
+# Extends ERA5 coverage from 2023-01-01 to 2026-06-30.
+# Uses era5_ext_batches/ checkpoint namespace — does not touch the existing
+# era5_batches/ checkpoints from the original 2015-2022 download.
+# Output: era5_recent.parquet on HuggingFace.
+#
+# Runs hourly (same pattern as original ERA5 cron) until all 198 batches done.
+# Open-Meteo free tier: ~4 batches/hr × 198 batches ≈ ~50 hourly runs ≈ 2 days.
+# Disable the cron once era5_recent.parquet appears in the HF dataset.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '15 * * * *'   # :15 past every hour (offset from original :00 cron)
+
+jobs:
+  era5-extend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install \
+            openmeteo-requests requests-cache retry-requests \
+            pandas numpy pyyaml \
+            huggingface-hub pyarrow httpx
+
+      - name: Extend ERA5 to 2026
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          python scripts/extend_era5.py --start 2023-01-01 --end 2026-06-30

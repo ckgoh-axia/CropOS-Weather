@@ -1,0 +1,36 @@
+name: NWP Extend (2023-2026)
+# One-shot: extends NWP GFS features from 2023-01-01 to 2026-06-30.
+# Uses nwp_ext_checkpoints/ on HF — does not conflict with existing nwp_checkpoints/.
+# Output: nwp_recent.parquet on HuggingFace.
+#
+# Per-station checkpoints: safe to re-run if it times out — resumes where it stopped.
+# Expected runtime: 30-60 minutes.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  nwp-extend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install \
+            openmeteo-requests requests-cache retry-requests \
+            pandas numpy pyyaml \
+            huggingface-hub pyarrow httpx
+
+      - name: Extend NWP to 2026
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          python scripts/extend_nwp.py --start 2023-01-01 --end 2026-06-30
