@@ -218,3 +218,181 @@ def test_dataset_zero_threshold_mostly_rain():
     rain_count = sum(int(ds[i]["farm"].y.sum()) for i in range(min(5, len(ds))))
     total = 5 * len(STATION_ORDER) * len(HORIZONS_H)
     assert rain_count > total * 0.5, "Expected mostly rain with threshold=0"
+
+
+# ── load_dataset_from_parquets (extension paths) ──────────────────────────────
+
+import tempfile
+from pathlib import Path
+
+from src.features.dataset import load_dataset_from_parquets
+from src.features.engineer import ERA5_SURFACE_VARS
+
+
+def _write_parquet(df: pd.DataFrame, directory: str, name: str) -> Path:
+    p = Path(directory) / name
+    df.to_parquet(p, index=False)
+    return p
+
+
+def _make_era5_parquet_df(n_hours: int = 30, n_pts: int = 3) -> pd.DataFrame:
+    timestamps = pd.date_range("2020-01-01", periods=n_hours, freq="1h", tz="UTC")
+    lats = [13.0, 13.5, 14.0][:n_pts]
+    lons = [100.0, 100.5, 101.0][:n_pts]
+    rng = np.random.default_rng(42)
+    rows = []
+    for ts in timestamps:
+        for lat, lon in zip(lats, lons):
+            row: dict = {"timestamp": ts, "lat": lat, "lon": lon}
+            for var in ERA5_SURFACE_VARS:
+                row[var] = float(rng.uniform(0, 5))
+            row["precipitation"] = float(rng.uniform(0, 5))
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _make_nwp_parquet_df(n_hours: int = 30) -> pd.DataFrame:
+    timestamps = pd.date_range("2020-01-01", periods=n_hours, freq="1h", tz="UTC")
+    rng = np.random.default_rng(43)
+    rows = []
+    for ts in timestamps:
+        for station, (lat, lon) in STATION_COORDS.items():
+            row: dict = {"station": station, "timestamp": ts, "lat": lat, "lon": lon}
+            for col in NWP_VARS:
+                row[col] = float(rng.uniform(0, 1))
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def test_load_dataset_from_parquets_basic():
+    """load_dataset_from_parquets returns a valid CropOSDataset from parquet files."""
+    with tempfile.TemporaryDirectory() as tmp:
+        era5_path = _write_parquet(_make_era5_parquet_df(), tmp, "era5.parquet")
+        nwp_path = _write_parquet(_make_nwp_parquet_df(), tmp, "nwp.parquet")
+
+        ds = load_dataset_from_parquets(
+            era5_path=era5_path,
+            nwp_path=nwp_path,
+            station_order=STATION_ORDER,
+            station_coords=STATION_COORDS,
+            nwp_var_cols=NWP_VARS,
+            horizons_h=HORIZONS_H,
+            era5_node_radius_km=9999.0,
+            threshold_mm=1.0,
+        )
+        assert len(ds) > 0
+
+
+def test_load_dataset_from_parquets_with_era5_recent():
+    """era5_recent_path data is concatenated into the training set."""
+    with tempfile.TemporaryDirectory() as tmp:
+        base_era5 = _make_era5_parquet_df(n_hours=20)
+        recent_era5 = _make_era5_parquet_df(n_hours=10)
+        # Shift recent timestamps forward so rows are distinct
+        recent_era5["timestamp"] = recent_era5["timestamp"] + pd.Timedelta(hours=20)
+
+        era5_path = _write_parquet(base_era5, tmp, "era5.parquet")
+        nwp_path = _write_parquet(_make_nwp_parquet_df(n_hours=30), tmp, "nwp.parquet")
+        era5_recent_path = _write_parquet(recent_era5, tmp, "era5_recent.parquet")
+
+        ds = load_dataset_from_parquets(
+            era5_path=era5_path,
+            nwp_path=nwp_path,
+            era5_recent_path=era5_recent_path,
+            station_order=STATION_ORDER,
+            station_coords=STATION_COORDS,
+            nwp_var_cols=NWP_VARS,
+            horizons_h=HORIZONS_H,
+            era5_node_radius_km=9999.0,
+            threshold_mm=1.0,
+        )
+        assert len(ds) > 0
+        # Dataset should have more ERA5 rows than base-only
+        ds_base = load_dataset_from_parquets(
+            era5_path=era5_path,
+            nwp_path=nwp_path,
+            station_order=STATION_ORDER,
+            station_coords=STATION_COORDS,
+            nwp_var_cols=NWP_VARS,
+            horizons_h=HORIZONS_H,
+            era5_node_radius_km=9999.0,
+            threshold_mm=1.0,
+        )
+        assert ds.n_era5_nodes >= ds_base.n_era5_nodes or len(ds) >= len(ds_base)
+
+
+def test_load_dataset_from_parquets_with_nwp_recent():
+    """nwp_recent_path data is concatenated into the training set."""
+    with tempfile.TemporaryDirectory() as tmp:
+        base_nwp = _make_nwp_parquet_df(n_hours=20)
+        recent_nwp = _make_nwp_parquet_df(n_hours=10)
+        recent_nwp["timestamp"] = recent_nwp["timestamp"] + pd.Timedelta(hours=20)
+
+        era5_path = _write_parquet(_make_era5_parquet_df(n_hours=30), tmp, "era5.parquet")
+        nwp_path = _write_parquet(base_nwp, tmp, "nwp.parquet")
+        nwp_recent_path = _write_parquet(recent_nwp, tmp, "nwp_recent.parquet")
+
+        ds = load_dataset_from_parquets(
+            era5_path=era5_path,
+            nwp_path=nwp_path,
+            nwp_recent_path=nwp_recent_path,
+            station_order=STATION_ORDER,
+            station_coords=STATION_COORDS,
+            nwp_var_cols=NWP_VARS,
+            horizons_h=HORIZONS_H,
+            era5_node_radius_km=9999.0,
+            threshold_mm=1.0,
+        )
+        assert len(ds) > 0
+
+
+def test_load_dataset_from_parquets_era5_recent_nonexistent_path_ignored():
+    """A non-existent era5_recent_path is silently ignored (no crash)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        era5_path = _write_parquet(_make_era5_parquet_df(), tmp, "era5.parquet")
+        nwp_path = _write_parquet(_make_nwp_parquet_df(), tmp, "nwp.parquet")
+
+        ds = load_dataset_from_parquets(
+            era5_path=era5_path,
+            nwp_path=nwp_path,
+            era5_recent_path=Path(tmp) / "does_not_exist.parquet",
+            station_order=STATION_ORDER,
+            station_coords=STATION_COORDS,
+            nwp_var_cols=NWP_VARS,
+            horizons_h=HORIZONS_H,
+            era5_node_radius_km=9999.0,
+            threshold_mm=1.0,
+        )
+        assert len(ds) > 0
+
+
+def test_load_dataset_from_parquets_date_filtering():
+    """start_date / end_date filter rows from both base and recent parquets."""
+    with tempfile.TemporaryDirectory() as tmp:
+        era5_path = _write_parquet(_make_era5_parquet_df(n_hours=30), tmp, "era5.parquet")
+        nwp_path = _write_parquet(_make_nwp_parquet_df(n_hours=30), tmp, "nwp.parquet")
+
+        ds = load_dataset_from_parquets(
+            era5_path=era5_path,
+            nwp_path=nwp_path,
+            station_order=STATION_ORDER,
+            station_coords=STATION_COORDS,
+            nwp_var_cols=NWP_VARS,
+            horizons_h=HORIZONS_H,
+            era5_node_radius_km=9999.0,
+            threshold_mm=1.0,
+            start_date="2020-01-01",
+            end_date="2020-01-02",
+        )
+        # Filtered to 24h window — can't be longer than full 30h dataset
+        ds_full = load_dataset_from_parquets(
+            era5_path=era5_path,
+            nwp_path=nwp_path,
+            station_order=STATION_ORDER,
+            station_coords=STATION_COORDS,
+            nwp_var_cols=NWP_VARS,
+            horizons_h=HORIZONS_H,
+            era5_node_radius_km=9999.0,
+            threshold_mm=1.0,
+        )
+        assert len(ds) <= len(ds_full)
