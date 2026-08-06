@@ -421,7 +421,8 @@ def load_dataset_from_parquets(
         recent_era5 = pd.read_parquet(era5_recent_path)
         recent_era5["timestamp"] = pd.to_datetime(recent_era5["timestamp"], utc=True)
         if start_date:
-            recent_era5 = recent_era5[recent_era5["timestamp"] >= pd.Timestamp(start_date, tz="UTC")]
+            ts_start = pd.Timestamp(start_date, tz="UTC")
+            recent_era5 = recent_era5[recent_era5["timestamp"] >= ts_start]
         if end_date:
             recent_era5 = recent_era5[recent_era5["timestamp"] <= pd.Timestamp(end_date, tz="UTC")]
         era5_df = pd.concat([era5_df, recent_era5], ignore_index=True)
@@ -485,7 +486,8 @@ def load_dataset_from_hf(
     from huggingface_hub import hf_hub_download
 
     def _dl(filename: str) -> Path:
-        return Path(hf_hub_download(  # nosec B615 — revision pinned to branch; SHA pinning is impractical for a live dataset
+        # nosec B615 — pinned to branch; SHA pinning impractical for live dataset
+        return Path(hf_hub_download(
             repo_id=repo_id,
             filename=filename,
             repo_type="dataset",
