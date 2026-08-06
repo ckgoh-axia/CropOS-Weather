@@ -486,8 +486,8 @@ def load_dataset_from_hf(
     from huggingface_hub import hf_hub_download
 
     def _dl(filename: str) -> Path:
-        # nosec B615 — pinned to branch; SHA pinning impractical for live dataset
-        return Path(hf_hub_download(
+        # revision="main" is intentional; SHA pinning impractical for a live dataset
+        return Path(hf_hub_download(  # nosec B615
             repo_id=repo_id,
             filename=filename,
             repo_type="dataset",
