@@ -36,11 +36,17 @@ ERA5_EXPECTED_GRID_POINTS = 1980  # 60 lat × 33 lon at 0.25° spacing
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def _load_hf(filename: str, repo_id: str, token: str) -> pd.DataFrame:
-    from huggingface_hub import hf_hub_download
-    path = hf_hub_download(
-        repo_id=repo_id, filename=filename, repo_type="dataset", token=token
+    # Stream directly from HF — no local disk cache, no ~/.cache/huggingface bloat
+    url = (
+        f"https://huggingface.co/datasets/{repo_id}"
+        f"/resolve/main/{filename}"
     )
-    return pd.read_parquet(path)
+    import requests
+    headers = {"Authorization": f"Bearer {token}"}
+    resp = requests.get(url, headers=headers, timeout=120)
+    resp.raise_for_status()
+    import io
+    return pd.read_parquet(io.BytesIO(resp.content))
 
 
 def _load_local(filename: str, data_dir: Path) -> pd.DataFrame:
