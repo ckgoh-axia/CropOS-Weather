@@ -393,21 +393,32 @@ def load_dataset_from_parquets(
     horizons_h: List[int] | None = None,
     threshold_mm: float = 1.0,
     era5_north_path: str | Path | None = None,
+    era5_recent_path: str | Path | None = None,
+    nwp_recent_path: str | Path | None = None,
+    nwp_var_cols: List[str] | None = None,
 ) -> CropOSDataset:
     """Build a CropOSDataset from on-disk or HuggingFace-cached parquet files.
 
     Args:
-        era5_path:       Path to era5_thailand.parquet (southern/existing grid).
-        nwp_path:        Path to nwp_features.parquet.
-        station_order:   Ordered list of METAR station IDs.
-        station_coords:  {station_id: (lat, lon)}.
-        start_date:      Clip to timestamps >= start_date (ISO format, UTC).
-        end_date:        Clip to timestamps <= end_date (ISO format, UTC).
+        era5_path:        Path to era5_thailand.parquet (southern/existing grid).
+        nwp_path:         Path to nwp_features.parquet.
+        station_order:    Ordered list of METAR station IDs.
+        station_coords:   {station_id: (lat, lon)}.
+        start_date:       Clip to timestamps >= start_date (ISO format, UTC).
+        end_date:         Clip to timestamps <= end_date (ISO format, UTC).
         era5_node_radius_km: ERA5 spatial filtering radius (default 100 km).
-        horizons_h:      Forecast horizons in hours.
-        threshold_mm:    Rain/no-rain threshold.
-        era5_north_path: Optional path to era5_north.parquet (northern grid top-up).
-                         If provided, concatenated with era5_path before filtering.
+        horizons_h:       Forecast horizons in hours.
+        threshold_mm:     Rain/no-rain threshold.
+        era5_north_path:  Optional path to era5_north.parquet (northern grid top-up).
+                          If provided, concatenated with era5_path before filtering.
+        era5_recent_path: Optional path to era5_recent.parquet (recent timestamps top-up).
+                          If provided and file exists, concatenated with era5_path.
+                          Silently ignored if path does not exist.
+        nwp_recent_path:  Optional path to nwp_recent.parquet (recent NWP top-up).
+                          If provided and file exists, concatenated with nwp_path.
+                          Silently ignored if path does not exist.
+        nwp_var_cols:     Explicit list of NWP feature column names to use.
+                          If None, auto-detected from columns starting with 'nwp_'.
 
     Returns:
         Constructed CropOSDataset ready for DataLoader.
@@ -438,6 +449,25 @@ def load_dataset_from_parquets(
     else:
         logger.info(f"ERA5: {len(era5_df):,} rows, {era5_df['timestamp'].nunique():,} timestamps")
 
+    # Merge recent ERA5 top-up if available (extends training set with newer timestamps)
+    if era5_recent_path is not None and Path(era5_recent_path).exists():
+        logger.info(f"Loading ERA5 recent top-up from {era5_recent_path}...")
+        recent_era5_df = pd.read_parquet(era5_recent_path)
+        recent_era5_df["timestamp"] = pd.to_datetime(recent_era5_df["timestamp"], utc=True)
+        if start_date:
+            recent_era5_df = recent_era5_df[
+                recent_era5_df["timestamp"] >= pd.Timestamp(start_date, tz="UTC")
+            ]
+        if end_date:
+            recent_era5_df = recent_era5_df[
+                recent_era5_df["timestamp"] <= pd.Timestamp(end_date, tz="UTC")
+            ]
+        era5_df = pd.concat([era5_df, recent_era5_df], ignore_index=True)
+        del recent_era5_df
+        logger.info(f"ERA5 (base + recent): {len(era5_df):,} rows")
+    elif era5_recent_path is not None:
+        logger.debug(f"era5_recent_path {era5_recent_path} not found — skipping")
+
     logger.info(f"Loading NWP from {nwp_path}...")
     nwp_df = pd.read_parquet(nwp_path)
     nwp_df["timestamp"] = pd.to_datetime(nwp_df["timestamp"], utc=True)
@@ -447,6 +477,25 @@ def load_dataset_from_parquets(
         nwp_df = nwp_df[nwp_df["timestamp"] <= pd.Timestamp(end_date, tz="UTC")]
     logger.info(f"NWP: {len(nwp_df):,} rows, {nwp_df['station'].nunique()} stations")
 
+    # Merge recent NWP top-up if available (e.g. nwp_recent.parquet for val/inference)
+    if nwp_recent_path is not None and Path(nwp_recent_path).exists():
+        logger.info(f"Loading NWP recent top-up from {nwp_recent_path}...")
+        recent_nwp_df = pd.read_parquet(nwp_recent_path)
+        recent_nwp_df["timestamp"] = pd.to_datetime(recent_nwp_df["timestamp"], utc=True)
+        if start_date:
+            recent_nwp_df = recent_nwp_df[
+                recent_nwp_df["timestamp"] >= pd.Timestamp(start_date, tz="UTC")
+            ]
+        if end_date:
+            recent_nwp_df = recent_nwp_df[
+                recent_nwp_df["timestamp"] <= pd.Timestamp(end_date, tz="UTC")
+            ]
+        nwp_df = pd.concat([nwp_df, recent_nwp_df], ignore_index=True)
+        del recent_nwp_df
+        logger.info(f"NWP (base + recent): {len(nwp_df):,} rows")
+    elif nwp_recent_path is not None:
+        logger.debug(f"nwp_recent_path {nwp_recent_path} not found — skipping")
+
     return CropOSDataset(
         era5_df=era5_df,
         nwp_df=nwp_df,
@@ -455,6 +504,7 @@ def load_dataset_from_parquets(
         horizons_h=horizons_h,
         era5_node_radius_km=era5_node_radius_km,
         threshold_mm=threshold_mm,
+        nwp_var_cols=nwp_var_cols,
     )
 
 
