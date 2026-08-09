@@ -35,31 +35,31 @@ def _edges_within_radius(
 
 def build_heterogeneous_graph(
     era5_nodes: List[Dict[str, Any]],
-    local_station_nodes: List[Dict[str, Any]],
+    metar_nodes: List[Dict[str, Any]],
     farm_nodes: List[Dict[str, Any]],
     edge_radius_km: float = 200.0,
 ) -> HeteroData:
-    """Build PyG HeteroData with era5, local_station, and farm node types.
+    """Build PyG HeteroData with era5, metar, and farm node types.
 
-    local_station nodes are agnostic to source — Phase 1 uses airport METAR
-    stations; Phase 2 adds cheap IoT farm sensors as the same node type without
-    retraining (SAGEConv weights are shared, not per-node-identity).
+    metar nodes carry real-time METAR airport observations (9 features:
+    precip_mm, rain_event, tmpf, dwpf, relh, drct, sknt, alti, vsby).
+    Phase 2 may add cheap IoT farm sensors as a separate node type.
     """
     data = HeteroData()
     data["era5"].x = torch.tensor(
         [n["feats"] for n in era5_nodes], dtype=torch.float
     )
-    data["local_station"].x = torch.tensor(
-        [n["feats"] for n in local_station_nodes], dtype=torch.float
+    data["metar"].x = torch.tensor(
+        [n["feats"] for n in metar_nodes], dtype=torch.float
     )
     data["farm"].x = torch.zeros((len(farm_nodes), 1), dtype=torch.float)
-    data["era5", "to", "local_station"].edge_index = _edges_within_radius(
-        era5_nodes, local_station_nodes, edge_radius_km
+    data["era5", "to", "metar"].edge_index = _edges_within_radius(
+        era5_nodes, metar_nodes, edge_radius_km
     )
     data["era5", "to", "farm"].edge_index = _edges_within_radius(
         era5_nodes, farm_nodes, edge_radius_km
     )
-    data["local_station", "to", "farm"].edge_index = _edges_within_radius(
-        local_station_nodes, farm_nodes, edge_radius_km
+    data["metar", "to", "farm"].edge_index = _edges_within_radius(
+        metar_nodes, farm_nodes, edge_radius_km
     )
     return data
