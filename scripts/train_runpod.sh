@@ -55,6 +55,20 @@ for filename in ["era5_thailand.parquet", "metar_thai.parquet", "nwp_features.pa
     )
     print(f"✓ {filename}")
 
+# Optional recent files — may not exist on HF yet; training code handles the absence gracefully
+for filename in ["era5_recent.parquet", "nwp_recent.parquet"]:
+    try:
+        hf_hub_download(
+            repo_id=repo_id,
+            filename=filename,
+            repo_type="dataset",
+            token=token,
+            local_dir=str(outdir),
+        )
+        print(f"✓ {filename}")
+    except Exception as e:
+        print(f"⚠ {filename} not found on HF ({e}) — skipping")
+
 print("Data pull complete")
 PYEOF
 

@@ -79,6 +79,24 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
         if era5_north_path:
             logger.info("Found era5_north.parquet — northern grid will be merged")
 
+        # Recent files cover validation period (e.g. 2023) not present in base parquets
+        era5_recent = data_dir / "era5_recent.parquet"
+        era5_recent_path = era5_recent if era5_recent.exists() else None
+        if era5_recent_path:
+            logger.info("Found era5_recent.parquet — recent ERA5 timestamps will be merged into val")
+        else:
+            logger.warning(
+                "era5_recent.parquet not found in data dir — val ERA5 will likely be empty. "
+                "Run the ERA5 recent download workflow to populate it."
+            )
+
+        nwp_recent = data_dir / "nwp_recent.parquet"
+        nwp_recent_path = nwp_recent if nwp_recent.exists() else None
+        if nwp_recent_path:
+            logger.info("Found nwp_recent.parquet — recent NWP data will be merged into val")
+        else:
+            logger.warning("nwp_recent.parquet not found in data dir — val NWP data may be sparse")
+
         train_ds = load_dataset_from_parquets(
             era5_path=data_dir / "era5_thailand.parquet",
             nwp_path=nwp_path,
@@ -102,6 +120,8 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
             horizons_h=horizons_h,
             threshold_mm=threshold_mm,
             era5_north_path=era5_north_path,
+            era5_recent_path=era5_recent_path,
+            nwp_recent_path=nwp_recent_path,
         )
     else:
         hf_token = os.environ.get("HF_TOKEN")

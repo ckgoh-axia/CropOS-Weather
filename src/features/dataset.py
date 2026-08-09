@@ -51,6 +51,13 @@ def _nearest_era5_point(
     lat: float, lon: float, era5_lats: np.ndarray, era5_lons: np.ndarray
 ) -> int:
     """Return the index of the ERA5 grid point nearest to (lat, lon)."""
+    if era5_lats.size == 0:
+        raise ValueError(
+            f"ERA5 grid is empty — no grid points within radius for station at "
+            f"({lat:.3f}, {lon:.3f}). This usually means era5_recent.parquet is missing "
+            f"for the requested date range. Check that era5_recent.parquet exists on HF "
+            f"and covers the validation period."
+        )
     dists = ((era5_lats - lat) ** 2 + (era5_lons - lon) ** 2)
     return int(np.argmin(dists))
 
@@ -550,6 +557,14 @@ def load_dataset_from_hf(
     except Exception:
         logger.info("era5_north.parquet not on HF yet — using southern grid only")
 
+    # Download recent ERA5 top-up if it exists on HF (covers validation / recent years)
+    era5_recent_path: Path | None = None
+    try:
+        era5_recent_path = _dl("era5_recent.parquet")
+        logger.info("Found era5_recent.parquet on HF — recent ERA5 timestamps will be merged")
+    except Exception:
+        logger.info("era5_recent.parquet not on HF yet — validation may have no ERA5 rows")
+
     # Try the 22-var NWP features file first; fall back to the legacy baseline.
     try:
         nwp_path = _dl("nwp_features.parquet")
@@ -557,6 +572,14 @@ def load_dataset_from_hf(
     except Exception:
         nwp_path = _dl("nwp_baseline.parquet")
         logger.warning("nwp_features.parquet not found on HF — using legacy nwp_baseline.parquet")
+
+    # Download recent NWP top-up if it exists on HF (covers validation / recent years)
+    nwp_recent_path: Path | None = None
+    try:
+        nwp_recent_path = _dl("nwp_recent.parquet")
+        logger.info("Found nwp_recent.parquet on HF — recent NWP data will be merged")
+    except Exception:
+        logger.info("nwp_recent.parquet not on HF yet — validation NWP data may be sparse")
 
     return load_dataset_from_parquets(
         era5_path=era5_path,
@@ -569,4 +592,6 @@ def load_dataset_from_hf(
         horizons_h=horizons_h,
         threshold_mm=threshold_mm,
         era5_north_path=era5_north_path,
+        era5_recent_path=era5_recent_path,
+        nwp_recent_path=nwp_recent_path,
     )
