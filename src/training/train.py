@@ -1,4 +1,4 @@
-"""Training loop for CropOSGNN with W&B tracking.
+"""Training loop for CropOSGNN with MLflow tracking.
 
 Run
 ---
@@ -10,7 +10,7 @@ Environment variables
 ---------------------
     HF_TOKEN            — HuggingFace read token (required unless --local)
     HF_DATASET_REPO     — Override auto-detected repo id
-    WANDB_API_KEY       — Weights & Biases API key
+    MLFLOW_TRACKING_URI — MLflow backend (default: local mlruns/)
 """
 from __future__ import annotations
 
@@ -19,9 +19,10 @@ import logging
 import os
 from pathlib import Path
 
+import mlflow
+import mlflow.pytorch
 import numpy as np
 import torch
-import wandb
 import yaml
 from torch_geometric.loader import DataLoader
 
@@ -72,7 +73,7 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
                 f"Expected one of: {nwp_candidates}"
             )
 
-        # Include northern ERA5 top-up if present
+        # Include northern ERA5 top-up if present (adds grid points for Bangkok, north Thailand)
         era5_north = data_dir / "era5_north.parquet"
         era5_north_path = era5_north if era5_north.exists() else None
         if era5_north_path:
@@ -140,6 +141,9 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
     )
 
     # ── fit feature scalers on training data ──────────────────────────────────
+    # Scalers are fit on training set ONLY; saved so inference uses identical scaling.
+    # Applied in-place to both train and val lookup dicts so __getitem__ returns
+    # already-scaled tensors with no overhead per batch.
     logger.info("Fitting feature scalers on training data...")
     import pandas as pd
     Path("checkpoints").mkdir(exist_ok=True)
@@ -166,33 +170,60 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
     nwp_scaler.fit(nwp_sample, train_ds.nwp_feature_cols)
     nwp_scaler.save("checkpoints/nwp_scaler.npz")
 
-    # Apply ERA5 scaler to BOTH train and val lookup dicts
+    # ── column diagnostics ───────────────────────────────────────────────────
+    # Log NWP feature column lists for both datasets so a mismatch between
+    # nwp_features.parquet (train) and nwp_recent.parquet (val) is immediately
+    # visible in the training logs.
+    logger.info(
+        f"NWP feature cols — train ({len(train_ds.nwp_feature_cols)}): "
+        f"{train_ds.nwp_feature_cols}"
+    )
+    logger.info(
+        f"NWP feature cols — val   ({len(val_ds.nwp_feature_cols)}): "
+        f"{val_ds.nwp_feature_cols}"
+    )
+    if train_ds.nwp_feature_cols != val_ds.nwp_feature_cols:
+        logger.error(
+            "NWP COLUMN MISMATCH between train and val datasets — "
+            "scaler will be applied with misaligned means/stds, corrupting "
+            "val features. Check nwp_features.parquet vs nwp_recent.parquet schemas."
+        )
+
+    # Apply ERA5 scaler to BOTH train and val lookup dicts.
+    # ERA5 feature columns are deterministic (ERA5_SURFACE_VARS + 4 temporal)
+    # so train and val always share the same ordered column list.
     era5_mean = np.array(
         [era5_scaler._means[c] for c in train_ds.era5_feature_cols], dtype=np.float32
     )
-    era5_std = np.array(
-        [era5_scaler._stds[c] for c in train_ds.era5_feature_cols], dtype=np.float32
+    era5_std = np.maximum(
+        np.array([era5_scaler._stds[c] for c in train_ds.era5_feature_cols], dtype=np.float32),
+        1e-8,
     )
     for ds in (train_ds, val_ds):
         for ts in ds._era5_by_ts:
             ds._era5_by_ts[ts] = (ds._era5_by_ts[ts] - era5_mean) / era5_std
 
-    # Apply NWP scaler to BOTH train and val lookup dicts
-    nwp_mean = np.array(
-        [nwp_scaler._means[c] for c in train_ds.nwp_feature_cols], dtype=np.float32
-    )
-    nwp_std = np.array(
-        [nwp_scaler._stds[c] for c in train_ds.nwp_feature_cols], dtype=np.float32
-    )
+    # Apply NWP scaler per-dataset using each dataset's own nwp_feature_cols.
+    # Building the mean/std array from the dataset's own column order (not just
+    # train's) handles any ordering difference between nwp_features.parquet and
+    # nwp_recent.parquet cleanly. FeatureScaler.fit() guarantees std >= 1e-8,
+    # but we guard again here defensively.
     for ds in (train_ds, val_ds):
+        ds_nwp_mean = np.array(
+            [nwp_scaler._means[c] for c in ds.nwp_feature_cols], dtype=np.float32
+        )
+        ds_nwp_std = np.maximum(
+            np.array([nwp_scaler._stds[c] for c in ds.nwp_feature_cols], dtype=np.float32),
+            1e-8,
+        )
         for ts in ds._nwp_by_ts:
-            ds._nwp_by_ts[ts] = (ds._nwp_by_ts[ts] - nwp_mean) / nwp_std
+            ds._nwp_by_ts[ts] = (ds._nwp_by_ts[ts] - ds_nwp_mean) / ds_nwp_std
 
     logger.info("Feature scalers fitted and applied to train + val")
 
     # ── model, optimizer, loss ────────────────────────────────────────────────
-    era5_in    = gnn_cfg.get("era5_in", len(ERA5_FEATURE_NAMES))
-    station_in = gnn_cfg.get("local_station_in", 22)
+    era5_in      = gnn_cfg.get("era5_in", len(ERA5_FEATURE_NAMES))
+    station_in   = gnn_cfg.get("local_station_in", 22)
 
     model = CropOSGNN(
         era5_in=era5_in,
@@ -226,80 +257,98 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
     )
     gradient_clip = tcfg.get("gradient_clip", 1.0)
 
-    # ── W&B run ───────────────────────────────────────────────────────────────
-    wandb.init(
-        project="cropos-gnn-thai",
-        config={
-            "era5_in":                 era5_in,
-            "local_station_in":        station_in,
-            "hidden":                  gnn_cfg["hidden_channels"],
-            "num_layers":              gnn_cfg["num_layers"],
-            "lr":                      tcfg["learning_rate"],
-            "batch_size":              tcfg["batch_size"],
-            "era5_radius_km":          era5_node_radius_km,
-            "loss":                    "brier_csi",
-            "device":                  str(device),
-            "epochs":                  tcfg["epochs"],
-            "early_stopping_patience": tcfg["early_stopping_patience"],
-        },
-    )
+    # ── MLflow run ────────────────────────────────────────────────────────────
+    mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI", "mlruns"))
+    mlflow.set_experiment("cropos-gnn-thai")
 
-    best_val_loss = float("inf")
-    patience_counter = 0
+    with mlflow.start_run():
+        mlflow.log_params({
+            "era5_in":           era5_in,
+            "local_station_in":  station_in,
+            "hidden":            gnn_cfg["hidden_channels"],
+            "num_layers":        gnn_cfg["num_layers"],
+            "lr":                tcfg["learning_rate"],
+            "batch_size":        tcfg["batch_size"],
+            "era5_radius_km":    era5_node_radius_km,
+            "loss":              "brier_csi",
+            "device":            str(device),
+        })
 
-    for epoch in range(tcfg["epochs"]):
-        # ── train ─────────────────────────────────────────────────────
-        model.train()
-        train_loss_sum = 0.0
-        train_batches = 0
-        for batch in train_loader:
-            batch = batch.to(device)
-            optimizer.zero_grad()
-            preds = model(batch)
-            labels = batch["farm"].y
-            loss = criterion(preds, labels)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
-            optimizer.step()
-            train_loss_sum += float(loss)
-            train_batches += 1
+        best_val_loss = float("inf")
+        patience_counter = 0
 
-        train_loss = train_loss_sum / max(train_batches, 1)
-
-        # ── validate ──────────────────────────────────────────────────
-        model.eval()
-        val_loss_sum = 0.0
-        val_batches = 0
-        with torch.no_grad():
-            for batch in val_loader:
+        for epoch in range(tcfg["epochs"]):
+            # ── train ─────────────────────────────────────────────────────
+            model.train()
+            train_loss_sum = 0.0
+            train_batches = 0
+            for batch in train_loader:
                 batch = batch.to(device)
-                preds = model(batch)
-                labels = batch["farm"].y
+                optimizer.zero_grad()
+                preds = model(batch)          # (n_farms_in_batch, n_horizons)
+                labels = batch["farm"].y      # same shape
                 loss = criterion(preds, labels)
-                val_loss_sum += float(loss)
-                val_batches += 1
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
+                optimizer.step()
+                train_loss_sum += float(loss)
+                train_batches += 1
 
-        val_loss = val_loss_sum / max(val_batches, 1)
+            train_loss = train_loss_sum / max(train_batches, 1)
 
-        wandb.log({"train_loss": train_loss, "val_loss": val_loss, "epoch": epoch})
-        logger.info(
-            f"Epoch {epoch:03d}: train={train_loss:.4f}  val={val_loss:.4f}"
-        )
+            # ── validate ──────────────────────────────────────────────────
+            model.eval()
+            val_loss_sum = 0.0
+            val_batches = 0
+            _val_preds_all: list[np.ndarray] = []
+            with torch.no_grad():
+                for batch in val_loader:
+                    batch = batch.to(device)
+                    preds = model(batch)
+                    labels = batch["farm"].y
+                    loss = criterion(preds, labels)
+                    val_loss_sum += float(loss)
+                    val_batches += 1
+                    _val_preds_all.append(preds.cpu().float().numpy())
 
-        # ── early stopping + checkpoint ───────────────────────────────
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            patience_counter = 0
-            torch.save(model.state_dict(), "checkpoints/best_model.pt")
-            wandb.save("checkpoints/best_model.pt")
-            logger.info(f"  ✓ new best val loss: {val_loss:.4f}")
-        else:
-            patience_counter += 1
-            if patience_counter >= tcfg["early_stopping_patience"]:
-                logger.info(f"Early stopping at epoch {epoch} (patience exhausted)")
-                break
+            val_loss = val_loss_sum / max(val_batches, 1)
 
-    wandb.finish()
+            # Log val prediction distribution every epoch to detect mode collapse
+            # (std ≈ 0 means model predicts a constant regardless of input → flat val_loss)
+            if _val_preds_all:
+                _preds_cat = np.concatenate(_val_preds_all, axis=0)
+                _pred_mean = float(_preds_cat.mean())
+                _pred_std  = float(_preds_cat.std())
+                logger.info(
+                    f"  val preds: mean={_pred_mean:.4f}  std={_pred_std:.4f}  "
+                    f"min={float(_preds_cat.min()):.4f}  max={float(_preds_cat.max()):.4f}"
+                )
+                if _pred_std < 0.005:
+                    logger.warning(
+                        f"  val pred std={_pred_std:.5f} — model predicting constant value. "
+                        f"Check val NWP data quality (see 'NWP quality' lines in dataset log)."
+                    )
+
+            mlflow.log_metrics(
+                {"train_loss": train_loss, "val_loss": val_loss}, step=epoch
+            )
+            logger.info(
+                f"Epoch {epoch:03d}: train={train_loss:.4f}  val={val_loss:.4f}"
+            )
+
+            # ── early stopping + checkpoint ───────────────────────────────
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                patience_counter = 0
+                torch.save(model.state_dict(), "checkpoints/best_model.pt")
+                mlflow.pytorch.log_model(model, "model")
+                logger.info(f"  ✓ new best val loss: {val_loss:.4f}")
+            else:
+                patience_counter += 1
+                if patience_counter >= tcfg["early_stopping_patience"]:
+                    logger.info(f"Early stopping at epoch {epoch} (patience exhausted)")
+                    break
+
     logger.info(f"Training complete. Best val loss: {best_val_loss:.4f}")
     logger.info("Model saved to checkpoints/best_model.pt")
     logger.info("Scalers saved to checkpoints/era5_scaler.npz")

@@ -199,7 +199,13 @@ class CropOSDataset(Dataset):
 
         # ── 3. determine NWP feature columns ──────────────────────────────
         if nwp_var_cols is None:
-            nwp_var_cols = [c for c in nwp_df.columns if c.startswith("nwp_")]
+            # Sort alphabetically so train and val always produce the same
+            # column order regardless of which parquet is the primary source.
+            # Without sorting, the order follows the first non-empty DataFrame
+            # in concat, which may differ between train (nwp_features.parquet)
+            # and val (nwp_recent.parquet) when nwp_features has 0 rows after
+            # date filtering — causing the scaler to scramble val features.
+            nwp_var_cols = sorted(c for c in nwp_df.columns if c.startswith("nwp_"))
         self.nwp_feature_cols = nwp_var_cols
         self.n_nwp_features = len(nwp_var_cols)
 
@@ -243,6 +249,28 @@ class CropOSDataset(Dataset):
             )
             self._nwp_by_ts[ts] = np.nan_to_num(arr, nan=0.0)
         logger.info(f"NWP lookup built: {len(self._nwp_by_ts):,} timestamps")
+
+        # ── NWP data-quality check ────────────────────────────────────────────
+        # A high zero-fraction means NaN→0 fill dominated the array — the model
+        # would see constant scaled features every timestamp → flat val_loss.
+        if self._nwp_by_ts:
+            _sample_keys = list(self._nwp_by_ts.keys())[:min(100, len(self._nwp_by_ts))]
+            _sample_arr = np.concatenate([self._nwp_by_ts[k] for k in _sample_keys], axis=0)
+            _zero_frac = float((_sample_arr == 0.0).mean())
+            _std = float(np.nanstd(_sample_arr))
+            logger.info(
+                f"NWP quality (first {len(_sample_keys)} ts, pre-scale): "
+                f"zero_frac={_zero_frac:.3f}  "
+                f"mean={float(np.nanmean(_sample_arr)):.4f}  std={_std:.4f}"
+            )
+            if _zero_frac > 0.50:
+                logger.warning(
+                    f"NWP zero_frac={_zero_frac:.1%} — likely widespread NaN fill "
+                    f"from missing data in nwp_recent.parquet. "
+                    f"Model will see near-constant inputs → expect flat val_loss. "
+                    f"Re-run the NWP data download for the affected date range."
+                )
+
         del nwp_df  # free memory — all data is in _nwp_by_ts
 
         # ── 7. build label array [n_ts, n_stations, n_horizons] ────────────
@@ -365,26 +393,21 @@ def load_dataset_from_parquets(
     horizons_h: List[int] | None = None,
     threshold_mm: float = 1.0,
     era5_north_path: str | Path | None = None,
-    era5_recent_path: str | Path | None = None,
-    nwp_recent_path: str | Path | None = None,
 ) -> CropOSDataset:
     """Build a CropOSDataset from on-disk or HuggingFace-cached parquet files.
 
     Args:
-        era5_path:        Path to era5_thailand.parquet (2015-2022, southern grid).
-        nwp_path:         Path to nwp_features.parquet (2016-2022 GFS).
-        station_order:    Ordered list of METAR station IDs.
-        station_coords:   {station_id: (lat, lon)}.
-        start_date:       Clip to timestamps >= start_date (ISO format, UTC).
-        end_date:         Clip to timestamps <= end_date (ISO format, UTC).
+        era5_path:       Path to era5_thailand.parquet (southern/existing grid).
+        nwp_path:        Path to nwp_features.parquet.
+        station_order:   Ordered list of METAR station IDs.
+        station_coords:  {station_id: (lat, lon)}.
+        start_date:      Clip to timestamps >= start_date (ISO format, UTC).
+        end_date:        Clip to timestamps <= end_date (ISO format, UTC).
         era5_node_radius_km: ERA5 spatial filtering radius (default 100 km).
-        horizons_h:       Forecast horizons in hours.
-        threshold_mm:     Rain/no-rain threshold.
-        era5_north_path:  Optional era5_north.parquet (northern grid top-up).
-        era5_recent_path: Optional era5_recent.parquet (2023-2026 extension).
-                          If provided, concatenated with era5_path after date filtering.
-        nwp_recent_path:  Optional nwp_recent.parquet (2023-2026 NWP extension).
-                          If provided, concatenated with nwp_path after date filtering.
+        horizons_h:      Forecast horizons in hours.
+        threshold_mm:    Rain/no-rain threshold.
+        era5_north_path: Optional path to era5_north.parquet (northern grid top-up).
+                         If provided, concatenated with era5_path before filtering.
 
     Returns:
         Constructed CropOSDataset ready for DataLoader.
@@ -415,20 +438,6 @@ def load_dataset_from_parquets(
     else:
         logger.info(f"ERA5: {len(era5_df):,} rows, {era5_df['timestamp'].nunique():,} timestamps")
 
-    # Merge 2023-2026 ERA5 extension if available (era5_recent.parquet)
-    if era5_recent_path is not None and Path(era5_recent_path).exists():
-        logger.info(f"Loading ERA5 2023-2026 extension from {era5_recent_path}...")
-        recent_era5 = pd.read_parquet(era5_recent_path)
-        recent_era5["timestamp"] = pd.to_datetime(recent_era5["timestamp"], utc=True)
-        if start_date:
-            ts_start = pd.Timestamp(start_date, tz="UTC")
-            recent_era5 = recent_era5[recent_era5["timestamp"] >= ts_start]
-        if end_date:
-            recent_era5 = recent_era5[recent_era5["timestamp"] <= pd.Timestamp(end_date, tz="UTC")]
-        era5_df = pd.concat([era5_df, recent_era5], ignore_index=True)
-        del recent_era5
-        logger.info(f"ERA5 (with 2023-2026 extension): {len(era5_df):,} rows total")
-
     logger.info(f"Loading NWP from {nwp_path}...")
     nwp_df = pd.read_parquet(nwp_path)
     nwp_df["timestamp"] = pd.to_datetime(nwp_df["timestamp"], utc=True)
@@ -437,19 +446,6 @@ def load_dataset_from_parquets(
     if end_date:
         nwp_df = nwp_df[nwp_df["timestamp"] <= pd.Timestamp(end_date, tz="UTC")]
     logger.info(f"NWP: {len(nwp_df):,} rows, {nwp_df['station'].nunique()} stations")
-
-    # Merge 2023-2026 NWP extension if available (nwp_recent.parquet)
-    if nwp_recent_path is not None and Path(nwp_recent_path).exists():
-        logger.info(f"Loading NWP 2023-2026 extension from {nwp_recent_path}...")
-        recent_nwp = pd.read_parquet(nwp_recent_path)
-        recent_nwp["timestamp"] = pd.to_datetime(recent_nwp["timestamp"], utc=True)
-        if start_date:
-            recent_nwp = recent_nwp[recent_nwp["timestamp"] >= pd.Timestamp(start_date, tz="UTC")]
-        if end_date:
-            recent_nwp = recent_nwp[recent_nwp["timestamp"] <= pd.Timestamp(end_date, tz="UTC")]
-        nwp_df = pd.concat([nwp_df, recent_nwp], ignore_index=True)
-        del recent_nwp
-        logger.info(f"NWP (with 2023-2026 extension): {len(nwp_df):,} rows total")
 
     return CropOSDataset(
         era5_df=era5_df,
@@ -486,13 +482,11 @@ def load_dataset_from_hf(
     from huggingface_hub import hf_hub_download
 
     def _dl(filename: str) -> Path:
-        # revision="main" is intentional; SHA pinning impractical for a live dataset
-        return Path(hf_hub_download(  # nosec B615
+        return Path(hf_hub_download(
             repo_id=repo_id,
             filename=filename,
             repo_type="dataset",
             token=hf_token,
-            revision="main",
             cache_dir=str(cache_dir) if cache_dir else None,
         ))
 
@@ -514,22 +508,6 @@ def load_dataset_from_hf(
         nwp_path = _dl("nwp_baseline.parquet")
         logger.warning("nwp_features.parquet not found on HF — using legacy nwp_baseline.parquet")
 
-    # Download 2023-2026 ERA5 extension if it exists on HF
-    era5_recent_path: Path | None = None
-    try:
-        era5_recent_path = _dl("era5_recent.parquet")
-        logger.info("Found era5_recent.parquet on HF — 2023-2026 ERA5 will be merged")
-    except Exception:
-        logger.info("era5_recent.parquet not on HF yet — using 2015-2022 only")
-
-    # Download 2023-2026 NWP extension if it exists on HF
-    nwp_recent_path: Path | None = None
-    try:
-        nwp_recent_path = _dl("nwp_recent.parquet")
-        logger.info("Found nwp_recent.parquet on HF — 2023-2026 NWP will be merged")
-    except Exception:
-        logger.info("nwp_recent.parquet not on HF yet — using 2016-2022 only")
-
     return load_dataset_from_parquets(
         era5_path=era5_path,
         nwp_path=nwp_path,
@@ -541,6 +519,4 @@ def load_dataset_from_hf(
         horizons_h=horizons_h,
         threshold_mm=threshold_mm,
         era5_north_path=era5_north_path,
-        era5_recent_path=era5_recent_path,
-        nwp_recent_path=nwp_recent_path,
     )
