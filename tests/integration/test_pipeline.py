@@ -37,8 +37,9 @@ def test_full_pipeline_metar_to_graph_to_gnn():
     # 3. Build graph
     era5_nodes = [{"lat": 15.0, "lon": 104.0,
                    "feats": [28.0, 26.0, 80.0, 0.0, 8.0, 180.0, 1010.0]}]
+    # 9 METAR features: precip_mm, rain_event, tmpf, dwpf, relh, drct, sknt, alti, vsby
     metar_nodes = [{"lat": 15.25, "lon": 104.87,
-                    "feats": [3.05, 1.0, 80.6, 74.3, 8.0]}]
+                    "feats": [3.05, 1.0, 80.6, 74.3, 84.0, 190.0, 8.0, 29.84, 4.0]}]
     farm_nodes = [{"lat": 15.1, "lon": 104.5, "farm_id": "test_farm"}]
     graph = build_heterogeneous_graph(
         era5_nodes, metar_nodes, farm_nodes, edge_radius_km=200
@@ -46,7 +47,7 @@ def test_full_pipeline_metar_to_graph_to_gnn():
     assert "farm" in graph.node_types
 
     # 4. GNN forward pass
-    model = CropOSGNN(era5_in=7, hidden=16, n_horizons=4)
+    model = CropOSGNN(era5_in=7, metar_in=9, hidden=16, n_horizons=4)
     model.eval()
     with torch.no_grad():
         out = model(graph)
