@@ -74,6 +74,8 @@ PYEOF
 
 mkdir -p checkpoints
 export HF_TOKEN="${HF_TOKEN}"
+# mlflow ≥ 2.x deprecated the file store — allow it explicitly in this ephemeral environment
+export MLFLOW_ALLOW_FILE_STORE=true
 
 python -m src.training.train
 
