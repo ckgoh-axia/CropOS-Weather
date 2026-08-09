@@ -16,11 +16,11 @@ import torch
 from torch_geometric.data import HeteroData
 
 from src.features.dataset import (
+    METAR_FEATURE_COLS,
+    CropOSDataset,
     _build_era5_label_df,
     _filter_era5_by_radius,
-    CropOSDataset,
     load_dataset_from_parquets,
-    METAR_FEATURE_COLS,
 )
 from src.features.engineer import ERA5_SURFACE_VARS
 
@@ -264,7 +264,7 @@ def _make_era5_parquet_df(n_hours: int = 30, n_pts: int = 3) -> pd.DataFrame:
     rng = np.random.default_rng(42)
     rows = []
     for ts in timestamps:
-        for lat, lon in zip(lats, lons):
+        for lat, lon in zip(lats, lons, strict=True):
             row: dict = {"timestamp": ts, "lat": lat, "lon": lon}
             for var in ERA5_SURFACE_VARS:
                 row[var] = float(rng.uniform(0, 5))
