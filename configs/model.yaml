@@ -11,7 +11,7 @@ gnn:
   #    5  terrain one-hot  (coastal, mountain, plain, urban, valley)
   #    4  region  one-hot  (central, north, northeast, south)
   era5_in: 11
-  local_station_in: 39
+  local_station_in: 22
   hidden_channels: 128
   num_layers: 2
   dropout: 0.1
