@@ -58,28 +58,13 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
     if local_data_dir:
         data_dir = Path(local_data_dir)
 
-        # Try the 22-var NWP features file first; fall back to legacy baseline.
-        nwp_candidates = ["nwp_features.parquet", "nwp_baseline.parquet"]
-        nwp_path = None
-        for name in nwp_candidates:
-            candidate = data_dir / name
-            if candidate.exists():
-                nwp_path = candidate
-                logger.info(f"Using NWP file: {name}")
-                break
-        if nwp_path is None:
-            raise FileNotFoundError(
-                f"No NWP parquet found in {data_dir}. "
-                f"Expected one of: {nwp_candidates}"
-            )
-
         # Include northern ERA5 top-up if present (adds grid points for Bangkok, north Thailand)
         era5_north = data_dir / "era5_north.parquet"
         era5_north_path = era5_north if era5_north.exists() else None
         if era5_north_path:
             logger.info("Found era5_north.parquet — northern grid will be merged")
 
-        # Recent files cover validation period (e.g. 2023) not present in base parquets
+        # Recent ERA5 covers validation period (e.g. 2023) not present in base parquets
         era5_recent = data_dir / "era5_recent.parquet"
         era5_recent_path = era5_recent if era5_recent.exists() else None
         if era5_recent_path:
@@ -92,16 +77,18 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
                 "Run the ERA5 recent download workflow to populate it."
             )
 
-        nwp_recent = data_dir / "nwp_recent.parquet"
-        nwp_recent_path = nwp_recent if nwp_recent.exists() else None
-        if nwp_recent_path:
-            logger.info("Found nwp_recent.parquet — recent NWP data will be merged into val")
-        else:
-            logger.warning("nwp_recent.parquet not found in data dir — val NWP data may be sparse")
+        # METAR observations — the actual local_station (metar node) features.
+        # metar_thai.parquet covers the full historical range (2015–present from Iowa State ASOS).
+        metar_path = data_dir / "metar_thai.parquet"
+        if not metar_path.exists():
+            raise FileNotFoundError(
+                f"metar_thai.parquet not found in {data_dir}. "
+                f"Run the METAR ingestion workflow to download it."
+            )
 
         train_ds = load_dataset_from_parquets(
             era5_path=data_dir / "era5_thailand.parquet",
-            nwp_path=nwp_path,
+            metar_path=metar_path,
             station_order=THAI_METAR_STATIONS,
             station_coords=STATION_COORDS,
             start_date=dcfg["training_start"],
@@ -113,7 +100,7 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
         )
         val_ds = load_dataset_from_parquets(
             era5_path=data_dir / "era5_thailand.parquet",
-            nwp_path=nwp_path,
+            metar_path=metar_path,
             station_order=THAI_METAR_STATIONS,
             station_coords=STATION_COORDS,
             start_date=dcfg["validation_start"],
@@ -123,7 +110,6 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
             threshold_mm=threshold_mm,
             era5_north_path=era5_north_path,
             era5_recent_path=era5_recent_path,
-            nwp_recent_path=nwp_recent_path,
         )
     else:
         hf_token = os.environ.get("HF_TOKEN")
@@ -180,36 +166,17 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
     era5_scaler.fit(era5_sample, train_ds.era5_feature_cols)
     era5_scaler.save("checkpoints/era5_scaler.npz")
 
-    # NWP scaler — build sample from first 500 training timestamps
-    nwp_scaler = FeatureScaler()
-    nwp_sample = pd.DataFrame(
+    # METAR scaler — fit on training data, 9 fixed features
+    metar_scaler = FeatureScaler()
+    metar_sample = pd.DataFrame(
         np.concatenate(
-            [train_ds._nwp_by_ts[ts] for ts in sample_ts if ts in train_ds._nwp_by_ts],
+            [train_ds._metar_by_ts[ts] for ts in sample_ts if ts in train_ds._metar_by_ts],
             axis=0,
         ),
-        columns=train_ds.nwp_feature_cols,
+        columns=train_ds.metar_feature_cols,
     )
-    nwp_scaler.fit(nwp_sample, train_ds.nwp_feature_cols)
-    nwp_scaler.save("checkpoints/nwp_scaler.npz")
-
-    # ── column diagnostics ───────────────────────────────────────────────────
-    # Log NWP feature column lists for both datasets so a mismatch between
-    # nwp_features.parquet (train) and nwp_recent.parquet (val) is immediately
-    # visible in the training logs.
-    logger.info(
-        f"NWP feature cols — train ({len(train_ds.nwp_feature_cols)}): "
-        f"{train_ds.nwp_feature_cols}"
-    )
-    logger.info(
-        f"NWP feature cols — val   ({len(val_ds.nwp_feature_cols)}): "
-        f"{val_ds.nwp_feature_cols}"
-    )
-    if train_ds.nwp_feature_cols != val_ds.nwp_feature_cols:
-        logger.error(
-            "NWP COLUMN MISMATCH between train and val datasets — "
-            "scaler will be applied with misaligned means/stds, corrupting "
-            "val features. Check nwp_features.parquet vs nwp_recent.parquet schemas."
-        )
+    metar_scaler.fit(metar_sample, train_ds.metar_feature_cols)
+    metar_scaler.save("checkpoints/metar_scaler.npz")
 
     # Apply ERA5 scaler to BOTH train and val lookup dicts.
     # ERA5 feature columns are deterministic (ERA5_SURFACE_VARS + 4 temporal)
@@ -225,27 +192,25 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
         for ts in ds._era5_by_ts:
             ds._era5_by_ts[ts] = (ds._era5_by_ts[ts] - era5_mean) / era5_std
 
-    # Apply NWP scaler per-dataset using each dataset's own nwp_feature_cols.
-    # Building the mean/std array from the dataset's own column order (not just
-    # train's) handles any ordering difference between nwp_features.parquet and
-    # nwp_recent.parquet cleanly. FeatureScaler.fit() guarantees std >= 1e-8,
-    # but we guard again here defensively.
+    # Apply METAR scaler to BOTH train and val lookup dicts.
+    # METAR feature columns are fixed (METAR_FEATURE_COLS) so train and val always
+    # share the same column list and ordering — no column mismatch risk.
+    metar_mean = np.array(
+        [metar_scaler._means[c] for c in train_ds.metar_feature_cols], dtype=np.float32
+    )
+    metar_std = np.maximum(
+        np.array([metar_scaler._stds[c] for c in train_ds.metar_feature_cols], dtype=np.float32),
+        1e-8,
+    )
     for ds in (train_ds, val_ds):
-        ds_nwp_mean = np.array(
-            [nwp_scaler._means[c] for c in ds.nwp_feature_cols], dtype=np.float32
-        )
-        ds_nwp_std = np.maximum(
-            np.array([nwp_scaler._stds[c] for c in ds.nwp_feature_cols], dtype=np.float32),
-            1e-8,
-        )
-        for ts in ds._nwp_by_ts:
-            ds._nwp_by_ts[ts] = (ds._nwp_by_ts[ts] - ds_nwp_mean) / ds_nwp_std
+        for ts in ds._metar_by_ts:
+            ds._metar_by_ts[ts] = (ds._metar_by_ts[ts] - metar_mean) / metar_std
 
     logger.info("Feature scalers fitted and applied to train + val")
 
     # ── model, optimizer, loss ────────────────────────────────────────────────
-    era5_in      = gnn_cfg.get("era5_in", len(ERA5_FEATURE_NAMES))
-    station_in   = gnn_cfg.get("local_station_in", 22)
+    era5_in   = gnn_cfg.get("era5_in", len(ERA5_FEATURE_NAMES))
+    metar_in  = gnn_cfg.get("metar_in", 9)
 
     model = CropOSGNN(
         era5_in=era5_in,
@@ -253,11 +218,11 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
         n_horizons=len(horizons_h),
         num_layers=gnn_cfg["num_layers"],
         dropout=gnn_cfg["dropout"],
-        local_station_dropout=gnn_cfg.get("local_station_dropout", 0.4),
-        local_station_in=station_in,
+        metar_dropout=gnn_cfg.get("metar_dropout", 0.4),
+        metar_in=metar_in,
     ).to(device)
     logger.info(
-        f"Model: era5_in={era5_in}, local_station_in={station_in}, "
+        f"Model: era5_in={era5_in}, metar_in={metar_in}, "
         f"hidden={gnn_cfg['hidden_channels']}, layers={gnn_cfg['num_layers']}"
     )
 
@@ -285,15 +250,15 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
 
     with mlflow.start_run():
         mlflow.log_params({
-            "era5_in":           era5_in,
-            "local_station_in":  station_in,
-            "hidden":            gnn_cfg["hidden_channels"],
-            "num_layers":        gnn_cfg["num_layers"],
-            "lr":                tcfg["learning_rate"],
-            "batch_size":        tcfg["batch_size"],
-            "era5_radius_km":    era5_node_radius_km,
-            "loss":              "brier_csi",
-            "device":            str(device),
+            "era5_in":        era5_in,
+            "metar_in":       metar_in,
+            "hidden":         gnn_cfg["hidden_channels"],
+            "num_layers":     gnn_cfg["num_layers"],
+            "lr":             tcfg["learning_rate"],
+            "batch_size":     tcfg["batch_size"],
+            "era5_radius_km": era5_node_radius_km,
+            "loss":           "brier_csi",
+            "device":         str(device),
         })
 
         best_val_loss = float("inf")
@@ -348,7 +313,7 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
                 if _pred_std < 0.005:
                     logger.warning(
                         f"  val pred std={_pred_std:.5f} — model predicting constant value. "
-                        f"Check val NWP data quality (see 'NWP quality' lines in dataset log)."
+                        f"Check METAR data quality and ERA5 recent coverage."
                     )
 
             mlflow.log_metrics(
@@ -373,7 +338,7 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
 
     logger.info(f"Training complete. Best val loss: {best_val_loss:.4f}")
     logger.info("Model saved to checkpoints/best_model.pt")
-    logger.info("Scalers saved to checkpoints/era5_scaler.npz")
+    logger.info("Scalers saved to checkpoints/era5_scaler.npz  checkpoints/metar_scaler.npz")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────

@@ -12,9 +12,9 @@ in-memory ERA5 footprint to ~500 MB instead of ~10 GB.
 
 Graph structure per timestamp
 ─────────────────────────────
-  era5 nodes         : filtered atmospheric grid (11 features: 7 ERA5 + 4 temporal)
-  local_station nodes: GFS NWP forecasts at the 16 METAR stations (22 features)
-  farm nodes         : prediction targets at the same 16 METAR locations (1 zero feature)
+  era5 nodes  : filtered atmospheric grid (11 features: 7 ERA5 + 4 temporal)
+  metar nodes : actual airport weather observations at the 16 METAR stations (9 features)
+  farm nodes  : prediction targets at the same 16 METAR locations (1 zero feature)
 
 Edges are computed ONCE from the fixed geography and reused for every sample.
 
@@ -43,6 +43,21 @@ from src.features.engineer import (
 from src.features.graph_builder import build_heterogeneous_graph, haversine_km
 
 logger = logging.getLogger(__name__)
+
+# METAR features available from real-time Iowa State ASOS feed.
+# These are the ONLY features used as local_station (metar node) inputs.
+# Order is fixed — do not reorder without updating model.yaml metar_in and checkpoints.
+METAR_FEATURE_COLS: List[str] = [
+    "precip_mm",   # hourly precipitation (mm); 0 when not reported
+    "rain_event",  # bool → float: 1.0 if RA/TS/SH wx code present
+    "tmpf",        # air temperature (°F)
+    "dwpf",        # dew point temperature (°F)
+    "relh",        # relative humidity (%)
+    "drct",        # wind direction (°)
+    "sknt",        # wind speed (knots)
+    "alti",        # altimeter setting (inHg)
+    "vsby",        # visibility (miles)
+]
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -147,20 +162,19 @@ class CropOSDataset(Dataset):
     """Per-timestamp HeteroData graphs for training CropOSGNN.
 
     Each sample corresponds to one UTC hour and contains:
-      - era5 nodes   : atmospheric features for ERA5 grid points near stations
-      - station nodes: GFS NWP features at the 16 METAR airport locations
-      - farm nodes   : zero-feature placeholders at the same 16 locations
-      - farm labels  : data["farm"].y of shape (n_stations, n_horizons)
+      - era5 nodes  : atmospheric features for ERA5 grid points near stations
+      - metar nodes : actual METAR observations at the 16 airport locations (9 features)
+      - farm nodes  : zero-feature placeholders at the same 16 locations
+      - farm labels : data["farm"].y of shape (n_stations, n_horizons)
 
     Args:
         era5_df:        ERA5 DataFrame (will be filtered to era5_node_radius_km).
                         Must have: timestamp, lat, lon + ERA5_SURFACE_VARS.
-        nwp_df:         NWP DataFrame from fetch_all_stations().
-                        Must have: timestamp, station, lat, lon + nwp_* columns.
+        metar_df:       METAR DataFrame from fetch_all_thai_stations().
+                        Must have: timestamp, station + METAR_FEATURE_COLS.
         station_order:  Ordered list of ICAO station IDs defining node ordering.
         station_coords: {station_id: (lat, lon)} for all stations in station_order.
         era5_vars:      ERA5 surface variable names (default: ERA5_SURFACE_VARS).
-        nwp_var_cols:   NWP feature column names with nwp_ prefix (default: all nwp_*).
         horizons_h:     Forecast horizons in hours (default: [12, 24, 36, 48]).
         era5_node_radius_km: ERA5 nodes included if within this radius of any station.
         threshold_mm:   Precipitation threshold for rain/no-rain label (default 1.0 mm).
@@ -169,11 +183,10 @@ class CropOSDataset(Dataset):
     def __init__(
         self,
         era5_df: pd.DataFrame,
-        nwp_df: pd.DataFrame,
+        metar_df: pd.DataFrame,
         station_order: List[str],
         station_coords: Dict[str, Tuple[float, float]],
         era5_vars: List[str] | None = None,
-        nwp_var_cols: List[str] | None = None,
         horizons_h: List[int] | None = None,
         era5_node_radius_km: float = 100.0,
         threshold_mm: float = 1.0,
@@ -204,17 +217,9 @@ class CropOSDataset(Dataset):
         self.era5_feature_cols = era5_feature_cols
         self.n_era5_features = len(era5_feature_cols)
 
-        # ── 3. determine NWP feature columns ──────────────────────────────
-        if nwp_var_cols is None:
-            # Sort alphabetically so train and val always produce the same
-            # column order regardless of which parquet is the primary source.
-            # Without sorting, the order follows the first non-empty DataFrame
-            # in concat, which may differ between train (nwp_features.parquet)
-            # and val (nwp_recent.parquet) when nwp_features has 0 rows after
-            # date filtering — causing the scaler to scramble val features.
-            nwp_var_cols = sorted(c for c in nwp_df.columns if c.startswith("nwp_"))
-        self.nwp_feature_cols = nwp_var_cols
-        self.n_nwp_features = len(nwp_var_cols)
+        # ── 3. METAR feature columns (fixed set, same as real-time prod feed) ─
+        self.metar_feature_cols = METAR_FEATURE_COLS
+        self.n_metar_features = len(METAR_FEATURE_COLS)
 
         # ── 4. unique sorted ERA5 grid points (fixed geography) ────────────
         unique_pts = (
@@ -242,43 +247,49 @@ class CropOSDataset(Dataset):
             )
         logger.info(f"ERA5 lookup built: {len(self._era5_by_ts):,} timestamps")
 
-        # ── 6. build NWP lookup dict {timestamp → (n_stations, n_nwp_feat)} ─
-        logger.info("Building NWP timestamp lookup...")
-        nwp_df = nwp_df.copy()
-        nwp_df["timestamp"] = pd.to_datetime(nwp_df["timestamp"], utc=True)
+        # ── 6. build METAR lookup dict {timestamp → (n_stations, n_metar_feat)} ─
+        logger.info("Building METAR timestamp lookup...")
+        metar_df = metar_df.copy()
+        metar_df["timestamp"] = pd.to_datetime(metar_df["timestamp"], utc=True)
 
-        self._nwp_by_ts: dict[pd.Timestamp, np.ndarray] = {}
-        for ts, grp in nwp_df.groupby("timestamp"):
+        # Cast rain_event (bool) to float so numpy stores it correctly
+        if "rain_event" in metar_df.columns:
+            metar_df["rain_event"] = metar_df["rain_event"].astype(float)
+
+        # Ensure all METAR feature columns are numeric
+        for col in METAR_FEATURE_COLS:
+            if col in metar_df.columns and col != "rain_event":
+                metar_df[col] = pd.to_numeric(metar_df[col], errors="coerce")
+
+        self._metar_by_ts: dict[pd.Timestamp, np.ndarray] = {}
+        for ts, grp in metar_df.groupby("timestamp"):
             arr = (
                 grp.set_index("station")
-                .reindex(station_order)[nwp_var_cols]
+                .reindex(station_order)[METAR_FEATURE_COLS]
                 .values.astype(np.float32)
             )
-            self._nwp_by_ts[ts] = np.nan_to_num(arr, nan=0.0)
-        logger.info(f"NWP lookup built: {len(self._nwp_by_ts):,} timestamps")
+            # NaN → 0: missing observation treated as sensor-absent (same as DropNode)
+            self._metar_by_ts[ts] = np.nan_to_num(arr, nan=0.0)
+        logger.info(f"METAR lookup built: {len(self._metar_by_ts):,} timestamps")
 
-        # ── NWP data-quality check ────────────────────────────────────────────
-        # A high zero-fraction means NaN→0 fill dominated the array — the model
-        # would see constant scaled features every timestamp → flat val_loss.
-        if self._nwp_by_ts:
-            _sample_keys = list(self._nwp_by_ts.keys())[:min(100, len(self._nwp_by_ts))]
-            _sample_arr = np.concatenate([self._nwp_by_ts[k] for k in _sample_keys], axis=0)
+        # ── METAR data-quality check ─────────────────────────────────────────
+        if self._metar_by_ts:
+            _sample_keys = list(self._metar_by_ts.keys())[:min(100, len(self._metar_by_ts))]
+            _sample_arr = np.concatenate([self._metar_by_ts[k] for k in _sample_keys], axis=0)
             _zero_frac = float((_sample_arr == 0.0).mean())
             _std = float(np.nanstd(_sample_arr))
             logger.info(
-                f"NWP quality (first {len(_sample_keys)} ts, pre-scale): "
+                f"METAR quality (first {len(_sample_keys)} ts, pre-scale): "
                 f"zero_frac={_zero_frac:.3f}  "
                 f"mean={float(np.nanmean(_sample_arr)):.4f}  std={_std:.4f}"
             )
-            if _zero_frac > 0.50:
+            if _zero_frac > 0.60:
                 logger.warning(
-                    f"NWP zero_frac={_zero_frac:.1%} — likely widespread NaN fill "
-                    f"from missing data in nwp_recent.parquet. "
-                    f"Model will see near-constant inputs → expect flat val_loss. "
-                    f"Re-run the NWP data download for the affected date range."
+                    f"METAR zero_frac={_zero_frac:.1%} — likely widespread missing observations. "
+                    f"Check metar_thai.parquet coverage for the requested date range."
                 )
 
-        del nwp_df  # free memory — all data is in _nwp_by_ts
+        del metar_df  # free memory — all data is in _metar_by_ts
 
         # ── 7. build label array [n_ts, n_stations, n_horizons] ────────────
         logger.info("Building ERA5 precipitation label table...")
@@ -287,9 +298,9 @@ class CropOSDataset(Dataset):
         )
         label_df = label_df.set_index(["timestamp", "station"])
 
-        # Timestamps where all ERA5 and NWP data are available
+        # Timestamps where both ERA5 and METAR data are available
         common_ts = sorted(
-            set(self._era5_by_ts) & set(self._nwp_by_ts),
+            set(self._era5_by_ts) & set(self._metar_by_ts),
             key=lambda t: t,
         )
         # Keep only timestamps for which ALL future label timestamps exist
@@ -331,9 +342,9 @@ class CropOSDataset(Dataset):
              "feats": [0.0] * self.n_era5_features}
             for i in range(self.n_era5_nodes)
         ]
-        station_node_list = [
+        metar_node_list = [
             {"lat": station_coords[s][0], "lon": station_coords[s][1],
-             "feats": [0.0] * self.n_nwp_features}
+             "feats": [0.0] * self.n_metar_features}
             for s in station_order
         ]
         farm_node_list = [
@@ -342,13 +353,13 @@ class CropOSDataset(Dataset):
         ]
         base = build_heterogeneous_graph(
             era5_nodes=era5_node_list,
-            local_station_nodes=station_node_list,
+            local_station_nodes=metar_node_list,
             farm_nodes=farm_node_list,
             edge_radius_km=era5_node_radius_km * 2.0,  # broad enough to cover all nearby ERA5
         )
-        self._edge_era5_to_local = base["era5", "to", "local_station"].edge_index
+        self._edge_era5_to_metar = base["era5", "to", "local_station"].edge_index
         self._edge_era5_to_farm  = base["era5", "to", "farm"].edge_index
-        self._edge_local_to_farm = base["local_station", "to", "farm"].edge_index
+        self._edge_metar_to_farm = base["local_station", "to", "farm"].edge_index
         logger.info("Dataset ready.")
 
     # ── Dataset interface ─────────────────────────────────────────────────────
@@ -366,23 +377,23 @@ class CropOSDataset(Dataset):
                 (self.n_era5_nodes, self.n_era5_features), dtype=np.float32
             )
 
-        # NWP station features
-        nwp_feats = self._nwp_by_ts.get(ts)
-        if nwp_feats is None:
-            nwp_feats = np.zeros(
-                (self.n_stations, self.n_nwp_features), dtype=np.float32
+        # METAR station features
+        metar_feats = self._metar_by_ts.get(ts)
+        if metar_feats is None:
+            metar_feats = np.zeros(
+                (self.n_stations, self.n_metar_features), dtype=np.float32
             )
 
         # Assemble HeteroData
         data = HeteroData()
         data["era5"].x = torch.from_numpy(era5_feats)
-        data["local_station"].x = torch.from_numpy(nwp_feats)
+        data["metar"].x = torch.from_numpy(metar_feats)
         data["farm"].x = torch.zeros(self.n_stations, 1, dtype=torch.float)
         data["farm"].y = torch.from_numpy(self._label_arr[idx])
 
-        data["era5", "to", "local_station"].edge_index = self._edge_era5_to_local
+        data["era5", "to", "metar"].edge_index = self._edge_era5_to_metar
         data["era5", "to", "farm"].edge_index = self._edge_era5_to_farm
-        data["local_station", "to", "farm"].edge_index = self._edge_local_to_farm
+        data["metar", "to", "farm"].edge_index = self._edge_metar_to_farm
 
         return data
 
@@ -391,7 +402,7 @@ class CropOSDataset(Dataset):
 
 def load_dataset_from_parquets(
     era5_path: str | Path,
-    nwp_path: str | Path,
+    metar_path: str | Path,
     station_order: List[str],
     station_coords: Dict[str, Tuple[float, float]],
     start_date: str | None = None,
@@ -401,14 +412,12 @@ def load_dataset_from_parquets(
     threshold_mm: float = 1.0,
     era5_north_path: str | Path | None = None,
     era5_recent_path: str | Path | None = None,
-    nwp_recent_path: str | Path | None = None,
-    nwp_var_cols: List[str] | None = None,
 ) -> CropOSDataset:
     """Build a CropOSDataset from on-disk or HuggingFace-cached parquet files.
 
     Args:
         era5_path:        Path to era5_thailand.parquet (southern/existing grid).
-        nwp_path:         Path to nwp_features.parquet.
+        metar_path:       Path to metar_thai.parquet (actual airport observations).
         station_order:    Ordered list of METAR station IDs.
         station_coords:   {station_id: (lat, lon)}.
         start_date:       Clip to timestamps >= start_date (ISO format, UTC).
@@ -421,11 +430,6 @@ def load_dataset_from_parquets(
         era5_recent_path: Optional path to era5_recent.parquet (recent timestamps top-up).
                           If provided and file exists, concatenated with era5_path.
                           Silently ignored if path does not exist.
-        nwp_recent_path:  Optional path to nwp_recent.parquet (recent NWP top-up).
-                          If provided and file exists, concatenated with nwp_path.
-                          Silently ignored if path does not exist.
-        nwp_var_cols:     Explicit list of NWP feature column names to use.
-                          If None, auto-detected from columns starting with 'nwp_'.
 
     Returns:
         Constructed CropOSDataset ready for DataLoader.
@@ -475,43 +479,23 @@ def load_dataset_from_parquets(
     elif era5_recent_path is not None:
         logger.debug(f"era5_recent_path {era5_recent_path} not found — skipping")
 
-    logger.info(f"Loading NWP from {nwp_path}...")
-    nwp_df = pd.read_parquet(nwp_path)
-    nwp_df["timestamp"] = pd.to_datetime(nwp_df["timestamp"], utc=True)
+    logger.info(f"Loading METAR from {metar_path}...")
+    metar_df = pd.read_parquet(metar_path)
+    metar_df["timestamp"] = pd.to_datetime(metar_df["timestamp"], utc=True)
     if start_date:
-        nwp_df = nwp_df[nwp_df["timestamp"] >= pd.Timestamp(start_date, tz="UTC")]
+        metar_df = metar_df[metar_df["timestamp"] >= pd.Timestamp(start_date, tz="UTC")]
     if end_date:
-        nwp_df = nwp_df[nwp_df["timestamp"] <= pd.Timestamp(end_date, tz="UTC")]
-    logger.info(f"NWP: {len(nwp_df):,} rows, {nwp_df['station'].nunique()} stations")
-
-    # Merge recent NWP top-up if available (e.g. nwp_recent.parquet for val/inference)
-    if nwp_recent_path is not None and Path(nwp_recent_path).exists():
-        logger.info(f"Loading NWP recent top-up from {nwp_recent_path}...")
-        recent_nwp_df = pd.read_parquet(nwp_recent_path)
-        recent_nwp_df["timestamp"] = pd.to_datetime(recent_nwp_df["timestamp"], utc=True)
-        if start_date:
-            recent_nwp_df = recent_nwp_df[
-                recent_nwp_df["timestamp"] >= pd.Timestamp(start_date, tz="UTC")
-            ]
-        if end_date:
-            recent_nwp_df = recent_nwp_df[
-                recent_nwp_df["timestamp"] <= pd.Timestamp(end_date, tz="UTC")
-            ]
-        nwp_df = pd.concat([nwp_df, recent_nwp_df], ignore_index=True)
-        del recent_nwp_df
-        logger.info(f"NWP (base + recent): {len(nwp_df):,} rows")
-    elif nwp_recent_path is not None:
-        logger.debug(f"nwp_recent_path {nwp_recent_path} not found — skipping")
+        metar_df = metar_df[metar_df["timestamp"] <= pd.Timestamp(end_date, tz="UTC")]
+    logger.info(f"METAR: {len(metar_df):,} rows, {metar_df['station'].nunique()} stations")
 
     return CropOSDataset(
         era5_df=era5_df,
-        nwp_df=nwp_df,
+        metar_df=metar_df,
         station_order=station_order,
         station_coords=station_coords,
         horizons_h=horizons_h,
         era5_node_radius_km=era5_node_radius_km,
         threshold_mm=threshold_mm,
-        nwp_var_cols=nwp_var_cols,
     )
 
 
@@ -565,25 +549,24 @@ def load_dataset_from_hf(
     except Exception:
         logger.info("era5_recent.parquet not on HF yet — validation may have no ERA5 rows")
 
-    # Try the 22-var NWP features file first; fall back to the legacy baseline.
-    try:
-        nwp_path = _dl("nwp_features.parquet")
-        logger.info("Using nwp_features.parquet (22-variable GFS set)")
-    except Exception:
-        nwp_path = _dl("nwp_baseline.parquet")
-        logger.warning("nwp_features.parquet not found on HF — using legacy nwp_baseline.parquet")
+    # METAR observations — these ARE the local_station (metar node) features for training.
+    # metar_thai.parquet covers the full historical range; date filtering is applied in
+    # load_dataset_from_parquets so the same file serves both train and val datasets.
+    metar_path = _dl("metar_thai.parquet")
+    logger.info("Using metar_thai.parquet for metar node features")
 
-    # Download recent NWP top-up if it exists on HF (covers validation / recent years)
-    nwp_recent_path: Path | None = None
-    try:
-        nwp_recent_path = _dl("nwp_recent.parquet")
-        logger.info("Found nwp_recent.parquet on HF — recent NWP data will be merged")
-    except Exception:
-        logger.info("nwp_recent.parquet not on HF yet — validation NWP data may be sparse")
+    # NWP forecast files — downloaded for future comparative study but NOT used in training.
+    # NWP forecasts are not available in real-time production; only METAR observations are.
+    for nwp_file in ["nwp_features.parquet", "nwp_recent.parquet"]:
+        try:
+            _dl(nwp_file)
+            logger.info(f"Downloaded {nwp_file} (comparative study; not used in training)")
+        except Exception:
+            logger.debug(f"{nwp_file} not on HF — skipping")
 
     return load_dataset_from_parquets(
         era5_path=era5_path,
-        nwp_path=nwp_path,
+        metar_path=metar_path,
         station_order=station_order,
         station_coords=station_coords,
         start_date=start_date,
@@ -593,5 +576,4 @@ def load_dataset_from_hf(
         threshold_mm=threshold_mm,
         era5_north_path=era5_north_path,
         era5_recent_path=era5_recent_path,
-        nwp_recent_path=nwp_recent_path,
     )

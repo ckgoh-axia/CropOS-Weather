@@ -17,6 +17,7 @@ from torch_geometric.data import HeteroData
 
 from src.features.dataset import (
     CropOSDataset,
+    METAR_FEATURE_COLS,
     _build_era5_label_df,
     _filter_era5_by_radius,
     load_dataset_from_parquets,
@@ -32,7 +33,6 @@ STATION_COORDS = {
 STATION_ORDER = ["STA0", "STA1"]
 HORIZONS_H = [12, 24]
 N_HOURS = 50          # training timestamps (need ≥ max_horizon + a few for valid_ts)
-NWP_VARS = [f"nwp_feat_{i}" for i in range(4)]   # 4 NWP features for speed
 
 
 def _make_era5_df(n_hours: int = N_HOURS, n_pts: int = 6) -> pd.DataFrame:
@@ -53,16 +53,23 @@ def _make_era5_df(n_hours: int = N_HOURS, n_pts: int = 6) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _make_nwp_df(n_hours: int = N_HOURS) -> pd.DataFrame:
-    """Tiny NWP DataFrame: 2 stations × n_hours timestamps × 4 features."""
+def _make_metar_df(n_hours: int = N_HOURS) -> pd.DataFrame:
+    """Tiny METAR DataFrame: 2 stations × n_hours timestamps × 9 features."""
     timestamps = pd.date_range("2020-01-01", periods=n_hours, freq="1h", tz="UTC")
     rng = np.random.default_rng(1)
     rows = []
     for ts in timestamps:
         for station, (lat, lon) in STATION_COORDS.items():
             row: dict = {"station": station, "timestamp": ts, "lat": lat, "lon": lon}
-            for col in NWP_VARS:
-                row[col] = float(rng.uniform(0, 1))
+            row["precip_mm"] = float(rng.uniform(0, 5))
+            row["rain_event"] = bool(rng.integers(0, 2))
+            row["tmpf"] = float(rng.uniform(70, 95))
+            row["dwpf"] = float(rng.uniform(60, 80))
+            row["relh"] = float(rng.uniform(50, 95))
+            row["drct"] = float(rng.uniform(0, 360))
+            row["sknt"] = float(rng.uniform(0, 20))
+            row["alti"] = float(rng.uniform(29.5, 30.5))
+            row["vsby"] = float(rng.uniform(5, 10))
             rows.append(row)
     return pd.DataFrame(rows)
 
@@ -70,7 +77,7 @@ def _make_nwp_df(n_hours: int = N_HOURS) -> pd.DataFrame:
 def _make_dataset(**kwargs) -> CropOSDataset:
     defaults = dict(
         era5_df=_make_era5_df(),
-        nwp_df=_make_nwp_df(),
+        metar_df=_make_metar_df(),
         station_order=STATION_ORDER,
         station_coords=STATION_COORDS,
         horizons_h=HORIZONS_H,
@@ -149,10 +156,17 @@ def test_dataset_era5_features_count():
     assert ds.n_era5_features == 11
 
 
-def test_dataset_local_station_shape():
+def test_dataset_metar_shape():
+    """metar nodes must have 9 features (METAR_FEATURE_COLS)."""
     ds = _make_dataset()
     sample = ds[0]
-    assert sample["local_station"].x.shape == (len(STATION_ORDER), len(NWP_VARS))
+    assert sample["metar"].x.shape == (len(STATION_ORDER), len(METAR_FEATURE_COLS))
+
+
+def test_dataset_metar_features_count():
+    ds = _make_dataset()
+    assert ds.n_metar_features == len(METAR_FEATURE_COLS)
+    assert ds.n_metar_features == 9
 
 
 def test_dataset_farm_placeholder_zeros():
@@ -179,9 +193,9 @@ def test_dataset_labels_binary():
 def test_dataset_edge_indices_present():
     ds = _make_dataset()
     sample = ds[0]
-    assert hasattr(sample["era5", "to", "local_station"], "edge_index")
+    assert hasattr(sample["era5", "to", "metar"], "edge_index")
     assert hasattr(sample["era5", "to", "farm"], "edge_index")
-    assert hasattr(sample["local_station", "to", "farm"], "edge_index")
+    assert hasattr(sample["metar", "to", "farm"], "edge_index")
 
 
 def test_dataset_edge_index_dtype():
@@ -197,11 +211,11 @@ def test_dataset_era5_features_float32():
     assert sample["era5"].x.dtype == torch.float32
 
 
-def test_dataset_nwp_no_nan():
-    """NWP missing values are filled with 0 — no NaN should reach the tensor."""
+def test_dataset_metar_no_nan():
+    """METAR missing values are filled with 0 — no NaN should reach the tensor."""
     ds = _make_dataset()
     for i in range(min(3, len(ds))):
-        assert not torch.any(torch.isnan(ds[i]["local_station"].x))
+        assert not torch.any(torch.isnan(ds[i]["metar"].x))
 
 
 def test_dataset_different_horizons():
@@ -227,8 +241,14 @@ def test_dataset_zero_threshold_mostly_rain():
     assert rain_count > total * 0.5, "Expected mostly rain with threshold=0"
 
 
-# ── load_dataset_from_parquets (extension paths) ──────────────────────────────
+def test_dataset_rain_event_cast_to_float():
+    """rain_event (bool in METAR) must be stored as float, not bool, in tensors."""
+    ds = _make_dataset()
+    sample = ds[0]
+    assert sample["metar"].x.dtype == torch.float32
 
+
+# ── load_dataset_from_parquets ────────────────────────────────────────────────
 
 
 def _write_parquet(df: pd.DataFrame, directory: str, name: str) -> Path:
@@ -253,15 +273,22 @@ def _make_era5_parquet_df(n_hours: int = 30, n_pts: int = 3) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _make_nwp_parquet_df(n_hours: int = 30) -> pd.DataFrame:
+def _make_metar_parquet_df(n_hours: int = 30) -> pd.DataFrame:
     timestamps = pd.date_range("2020-01-01", periods=n_hours, freq="1h", tz="UTC")
     rng = np.random.default_rng(43)
     rows = []
     for ts in timestamps:
         for station, (lat, lon) in STATION_COORDS.items():
             row: dict = {"station": station, "timestamp": ts, "lat": lat, "lon": lon}
-            for col in NWP_VARS:
-                row[col] = float(rng.uniform(0, 1))
+            row["precip_mm"] = float(rng.uniform(0, 5))
+            row["rain_event"] = bool(rng.integers(0, 2))
+            row["tmpf"] = float(rng.uniform(70, 95))
+            row["dwpf"] = float(rng.uniform(60, 80))
+            row["relh"] = float(rng.uniform(50, 95))
+            row["drct"] = float(rng.uniform(0, 360))
+            row["sknt"] = float(rng.uniform(0, 20))
+            row["alti"] = float(rng.uniform(29.5, 30.5))
+            row["vsby"] = float(rng.uniform(5, 10))
             rows.append(row)
     return pd.DataFrame(rows)
 
@@ -270,11 +297,11 @@ def test_load_dataset_from_parquets_basic():
     """load_dataset_from_parquets returns a valid CropOSDataset from parquet files."""
     with tempfile.TemporaryDirectory() as tmp:
         era5_path = _write_parquet(_make_era5_parquet_df(), tmp, "era5.parquet")
-        nwp_path = _write_parquet(_make_nwp_parquet_df(), tmp, "nwp.parquet")
+        metar_path = _write_parquet(_make_metar_parquet_df(), tmp, "metar.parquet")
 
         ds = load_dataset_from_parquets(
             era5_path=era5_path,
-            nwp_path=nwp_path,
+            metar_path=metar_path,
             station_order=STATION_ORDER,
             station_coords=STATION_COORDS,
             horizons_h=HORIZONS_H,
@@ -293,12 +320,12 @@ def test_load_dataset_from_parquets_with_era5_recent():
         recent_era5["timestamp"] = recent_era5["timestamp"] + pd.Timedelta(hours=20)
 
         era5_path = _write_parquet(base_era5, tmp, "era5.parquet")
-        nwp_path = _write_parquet(_make_nwp_parquet_df(n_hours=30), tmp, "nwp.parquet")
+        metar_path = _write_parquet(_make_metar_parquet_df(n_hours=30), tmp, "metar.parquet")
         era5_recent_path = _write_parquet(recent_era5, tmp, "era5_recent.parquet")
 
         ds = load_dataset_from_parquets(
             era5_path=era5_path,
-            nwp_path=nwp_path,
+            metar_path=metar_path,
             era5_recent_path=era5_recent_path,
             station_order=STATION_ORDER,
             station_coords=STATION_COORDS,
@@ -310,7 +337,7 @@ def test_load_dataset_from_parquets_with_era5_recent():
         # Dataset should have more ERA5 rows than base-only
         ds_base = load_dataset_from_parquets(
             era5_path=era5_path,
-            nwp_path=nwp_path,
+            metar_path=metar_path,
             station_order=STATION_ORDER,
             station_coords=STATION_COORDS,
             horizons_h=HORIZONS_H,
@@ -320,39 +347,15 @@ def test_load_dataset_from_parquets_with_era5_recent():
         assert ds.n_era5_nodes >= ds_base.n_era5_nodes or len(ds) >= len(ds_base)
 
 
-def test_load_dataset_from_parquets_with_nwp_recent():
-    """nwp_recent_path data is concatenated into the training set."""
-    with tempfile.TemporaryDirectory() as tmp:
-        base_nwp = _make_nwp_parquet_df(n_hours=20)
-        recent_nwp = _make_nwp_parquet_df(n_hours=10)
-        recent_nwp["timestamp"] = recent_nwp["timestamp"] + pd.Timedelta(hours=20)
-
-        era5_path = _write_parquet(_make_era5_parquet_df(n_hours=30), tmp, "era5.parquet")
-        nwp_path = _write_parquet(base_nwp, tmp, "nwp.parquet")
-        nwp_recent_path = _write_parquet(recent_nwp, tmp, "nwp_recent.parquet")
-
-        ds = load_dataset_from_parquets(
-            era5_path=era5_path,
-            nwp_path=nwp_path,
-            nwp_recent_path=nwp_recent_path,
-            station_order=STATION_ORDER,
-            station_coords=STATION_COORDS,
-            horizons_h=HORIZONS_H,
-            era5_node_radius_km=9999.0,
-            threshold_mm=1.0,
-        )
-        assert len(ds) > 0
-
-
 def test_load_dataset_from_parquets_era5_recent_nonexistent_path_ignored():
     """A non-existent era5_recent_path is silently ignored (no crash)."""
     with tempfile.TemporaryDirectory() as tmp:
         era5_path = _write_parquet(_make_era5_parquet_df(), tmp, "era5.parquet")
-        nwp_path = _write_parquet(_make_nwp_parquet_df(), tmp, "nwp.parquet")
+        metar_path = _write_parquet(_make_metar_parquet_df(), tmp, "metar.parquet")
 
         ds = load_dataset_from_parquets(
             era5_path=era5_path,
-            nwp_path=nwp_path,
+            metar_path=metar_path,
             era5_recent_path=Path(tmp) / "does_not_exist.parquet",
             station_order=STATION_ORDER,
             station_coords=STATION_COORDS,
@@ -364,14 +367,14 @@ def test_load_dataset_from_parquets_era5_recent_nonexistent_path_ignored():
 
 
 def test_load_dataset_from_parquets_date_filtering():
-    """start_date / end_date filter rows from both base and recent parquets."""
+    """start_date / end_date filter rows from both ERA5 and METAR parquets."""
     with tempfile.TemporaryDirectory() as tmp:
         era5_path = _write_parquet(_make_era5_parquet_df(n_hours=30), tmp, "era5.parquet")
-        nwp_path = _write_parquet(_make_nwp_parquet_df(n_hours=30), tmp, "nwp.parquet")
+        metar_path = _write_parquet(_make_metar_parquet_df(n_hours=30), tmp, "metar.parquet")
 
         ds = load_dataset_from_parquets(
             era5_path=era5_path,
-            nwp_path=nwp_path,
+            metar_path=metar_path,
             station_order=STATION_ORDER,
             station_coords=STATION_COORDS,
             horizons_h=HORIZONS_H,
@@ -383,7 +386,7 @@ def test_load_dataset_from_parquets_date_filtering():
         # Filtered to 24h window — can't be longer than full 30h dataset
         ds_full = load_dataset_from_parquets(
             era5_path=era5_path,
-            nwp_path=nwp_path,
+            metar_path=metar_path,
             station_order=STATION_ORDER,
             station_coords=STATION_COORDS,
             horizons_h=HORIZONS_H,
@@ -391,3 +394,22 @@ def test_load_dataset_from_parquets_date_filtering():
             threshold_mm=1.0,
         )
         assert len(ds) <= len(ds_full)
+
+
+def test_load_dataset_metar_feature_cols_constant():
+    """METAR feature columns are fixed regardless of parquet contents."""
+    with tempfile.TemporaryDirectory() as tmp:
+        era5_path = _write_parquet(_make_era5_parquet_df(), tmp, "era5.parquet")
+        metar_path = _write_parquet(_make_metar_parquet_df(), tmp, "metar.parquet")
+
+        ds = load_dataset_from_parquets(
+            era5_path=era5_path,
+            metar_path=metar_path,
+            station_order=STATION_ORDER,
+            station_coords=STATION_COORDS,
+            horizons_h=HORIZONS_H,
+            era5_node_radius_km=9999.0,
+            threshold_mm=1.0,
+        )
+        assert ds.metar_feature_cols == METAR_FEATURE_COLS
+        assert ds.n_metar_features == 9
