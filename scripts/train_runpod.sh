@@ -13,6 +13,8 @@ cd /workspace/cropos
 # so poetry install fails silently. Install deps directly via pip instead.
 # torch 2.2.1+cu121 is already present in the base image — skip reinstalling it.
 echo "=== Installing dependencies ==="
+# blinker is pre-installed via distutils in the base image; replace it so mlflow can install cleanly
+pip install blinker --ignore-installed -q
 pip install wandb mlflow -q
 
 # PyG wheels must come from the official index keyed to torch+cuda version
