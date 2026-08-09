@@ -13,7 +13,7 @@ cd /workspace/cropos
 # so poetry install fails silently. Install deps directly via pip instead.
 # torch 2.2.1+cu121 is already present in the base image — skip reinstalling it.
 echo "=== Installing dependencies ==="
-pip install wandb -q
+pip install wandb mlflow -q
 
 # PyG wheels must come from the official index keyed to torch+cuda version
 pip install torch-geometric -q
