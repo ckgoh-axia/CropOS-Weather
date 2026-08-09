@@ -1,14 +1,6 @@
 name: Trigger Training Run
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "src/models/**"
-      - "src/features/**"
-      - "src/training/**"
-      - "configs/model.yaml"
-      - "configs/training.yaml"
   workflow_dispatch:
 
 jobs:
@@ -29,8 +21,6 @@ jobs:
 
           runpod.api_key = os.environ["RUNPOD_API_KEY"]
 
-          # Try GPUs in order of preference — community cloud availability varies.
-          # All have ≥16 GB VRAM which is sufficient for the 128-hidden GNN.
           GPU_CANDIDATES = [
               ("NVIDIA GeForce RTX 4090", "COMMUNITY"),
               ("NVIDIA GeForce RTX 3090", "COMMUNITY"),
