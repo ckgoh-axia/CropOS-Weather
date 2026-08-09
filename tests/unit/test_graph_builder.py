@@ -31,60 +31,60 @@ def test_haversine_same_point_is_zero():
 def test_graph_has_all_three_node_types():
     graph = build_heterogeneous_graph(
         era5_nodes=_era5(),
-        local_station_nodes=_station_nearby(),
+        metar_nodes=_station_nearby(),
         farm_nodes=_farm(),
         edge_radius_km=200,
     )
     assert "era5" in graph.node_types
-    assert "local_station" in graph.node_types
+    assert "metar" in graph.node_types
     assert "farm" in graph.node_types
 
 
 def test_graph_node_feature_shapes():
     graph = build_heterogeneous_graph(
         era5_nodes=_era5(),
-        local_station_nodes=_station_nearby(),
+        metar_nodes=_station_nearby(),
         farm_nodes=_farm(),
         edge_radius_km=200,
     )
     assert graph["era5"].x.shape == (1, 7)
-    assert graph["local_station"].x.shape == (1, 5)
+    assert graph["metar"].x.shape == (1, 5)
     assert graph["farm"].x.shape == (1, 1)
 
 
 def test_graph_edges_connect_nearby_nodes():
     graph = build_heterogeneous_graph(
         era5_nodes=_era5(),
-        local_station_nodes=_station_nearby(),
+        metar_nodes=_station_nearby(),
         farm_nodes=_farm(),
         edge_radius_km=200,
     )
-    assert graph["era5", "to", "local_station"].edge_index.shape[1] > 0
-    assert graph["local_station", "to", "farm"].edge_index.shape[1] > 0
+    assert graph["era5", "to", "metar"].edge_index.shape[1] > 0
+    assert graph["metar", "to", "farm"].edge_index.shape[1] > 0
     assert graph["era5", "to", "farm"].edge_index.shape[1] > 0
 
 
 def test_graph_edges_exclude_distant_nodes():
     graph = build_heterogeneous_graph(
         era5_nodes=_era5(),
-        local_station_nodes=_station_far(),
+        metar_nodes=_station_far(),
         farm_nodes=_farm(),
         edge_radius_km=100,
     )
-    assert graph["era5", "to", "local_station"].edge_index.shape[1] == 0
-    assert graph["local_station", "to", "farm"].edge_index.shape[1] == 0
+    assert graph["era5", "to", "metar"].edge_index.shape[1] == 0
+    assert graph["metar", "to", "farm"].edge_index.shape[1] == 0
 
 
 def test_graph_no_local_stations():
-    """ERA5-only graph: local_station tensor exists but is empty."""
+    """ERA5-only graph: metar tensor exists but is empty."""
     graph = build_heterogeneous_graph(
         era5_nodes=_era5(),
-        local_station_nodes=[],
+        metar_nodes=[],
         farm_nodes=_farm(),
         edge_radius_km=200,
     )
-    assert graph["local_station"].x.shape[0] == 0
-    assert graph["era5", "to", "local_station"].edge_index.shape[1] == 0
+    assert graph["metar"].x.shape[0] == 0
+    assert graph["era5", "to", "metar"].edge_index.shape[1] == 0
 
 
 def test_graph_multiple_farms():
@@ -95,7 +95,7 @@ def test_graph_multiple_farms():
     ]
     graph = build_heterogeneous_graph(
         era5_nodes=_era5(),
-        local_station_nodes=_station_nearby(),
+        metar_nodes=_station_nearby(),
         farm_nodes=farms,
         edge_radius_km=300,
     )

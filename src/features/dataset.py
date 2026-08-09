@@ -353,13 +353,13 @@ class CropOSDataset(Dataset):
         ]
         base = build_heterogeneous_graph(
             era5_nodes=era5_node_list,
-            local_station_nodes=metar_node_list,
+            metar_nodes=metar_node_list,
             farm_nodes=farm_node_list,
             edge_radius_km=era5_node_radius_km * 2.0,  # broad enough to cover all nearby ERA5
         )
-        self._edge_era5_to_metar = base["era5", "to", "local_station"].edge_index
+        self._edge_era5_to_metar = base["era5", "to", "metar"].edge_index
         self._edge_era5_to_farm  = base["era5", "to", "farm"].edge_index
-        self._edge_metar_to_farm = base["local_station", "to", "farm"].edge_index
+        self._edge_metar_to_farm = base["metar", "to", "farm"].edge_index
         logger.info("Dataset ready.")
 
     # ── Dataset interface ─────────────────────────────────────────────────────
