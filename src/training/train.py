@@ -83,7 +83,9 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
         era5_recent = data_dir / "era5_recent.parquet"
         era5_recent_path = era5_recent if era5_recent.exists() else None
         if era5_recent_path:
-            logger.info("Found era5_recent.parquet — recent ERA5 timestamps will be merged into val")
+            logger.info(
+                "Found era5_recent.parquet — recent ERA5 timestamps will be merged into val"
+            )
         else:
             logger.warning(
                 "era5_recent.parquet not found in data dir — val ERA5 will likely be empty. "
