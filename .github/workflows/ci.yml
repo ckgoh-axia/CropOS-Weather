@@ -20,6 +20,10 @@ jobs:
 
       - name: Install dependencies
         run: |
+          # numpy <2.0 must come first — torch 2.2.x uses the numpy 1.x ABI;
+          # installing numpy after torch causes "Numpy is not available" at runtime.
+          pip install "numpy>=1.26.0,<2.0"
+
           # torch CPU-only wheel (no CUDA needed for unit tests)
           pip install torch==2.2.1 --index-url https://download.pytorch.org/whl/cpu
 
@@ -31,7 +35,7 @@ jobs:
           pip install \
             mlflow \
             openmeteo-requests requests-cache retry-requests \
-            pandas numpy xarray scikit-learn \
+            pandas xarray scikit-learn \
             fastapi uvicorn pydantic httpx \
             python-dotenv "huggingface-hub>=0.21" pyarrow pyyaml tqdm \
             ruff bandit pytest pytest-asyncio pytest-cov respx
