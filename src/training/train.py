@@ -144,6 +144,11 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
             threshold_mm=threshold_mm,
         )
 
+    # Prompt GC between dataset constructions so the large ERA5 DataFrame from
+    # the training set is freed before the validation set's parquet is loaded.
+    import gc as _gc
+    _gc.collect()
+
     logger.info(
         f"Train: {len(train_ds):,} samples  |  Val: {len(val_ds):,} samples"
     )

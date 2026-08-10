@@ -434,8 +434,23 @@ def load_dataset_from_parquets(
     Returns:
         Constructed CropOSDataset ready for DataLoader.
     """
+    # Build pyarrow row-group filters so we only materialise the requested date slice.
+    # This dramatically cuts peak RAM when loading a multi-year parquet for a short
+    # validation window (e.g. 1 year out of 9).  Falls back silently if the parquet
+    # stores timestamps as strings or has no row-group statistics.
+    def _pq_date_filters(start: str | None, end: str | None) -> list | None:
+        filters: list[tuple] = []
+        if start:
+            filters.append(("timestamp", ">=", pd.Timestamp(start, tz="UTC")))
+        if end:
+            filters.append(("timestamp", "<=", pd.Timestamp(end, tz="UTC")))
+        return filters if filters else None
+
     logger.info(f"Loading ERA5 from {era5_path}...")
-    era5_df = pd.read_parquet(era5_path)
+    try:
+        era5_df = pd.read_parquet(era5_path, filters=_pq_date_filters(start_date, end_date))
+    except Exception:
+        era5_df = pd.read_parquet(era5_path)
     era5_df["timestamp"] = pd.to_datetime(era5_df["timestamp"], utc=True)
     if start_date:
         era5_df = era5_df[era5_df["timestamp"] >= pd.Timestamp(start_date, tz="UTC")]
@@ -445,7 +460,10 @@ def load_dataset_from_parquets(
     # Merge northern top-up if available (adds grid points for Bangkok, Chiang Mai, etc.)
     if era5_north_path is not None and Path(era5_north_path).exists():
         logger.info(f"Loading ERA5 north top-up from {era5_north_path}...")
-        north_df = pd.read_parquet(era5_north_path)
+        try:
+            north_df = pd.read_parquet(era5_north_path, filters=_pq_date_filters(start_date, end_date))
+        except Exception:
+            north_df = pd.read_parquet(era5_north_path)
         north_df["timestamp"] = pd.to_datetime(north_df["timestamp"], utc=True)
         if start_date:
             north_df = north_df[north_df["timestamp"] >= pd.Timestamp(start_date, tz="UTC")]
@@ -463,7 +481,10 @@ def load_dataset_from_parquets(
     # Merge recent ERA5 top-up if available (extends training set with newer timestamps)
     if era5_recent_path is not None and Path(era5_recent_path).exists():
         logger.info(f"Loading ERA5 recent top-up from {era5_recent_path}...")
-        recent_era5_df = pd.read_parquet(era5_recent_path)
+        try:
+            recent_era5_df = pd.read_parquet(era5_recent_path, filters=_pq_date_filters(start_date, end_date))
+        except Exception:
+            recent_era5_df = pd.read_parquet(era5_recent_path)
         recent_era5_df["timestamp"] = pd.to_datetime(recent_era5_df["timestamp"], utc=True)
         if start_date:
             recent_era5_df = recent_era5_df[
@@ -480,7 +501,10 @@ def load_dataset_from_parquets(
         logger.debug(f"era5_recent_path {era5_recent_path} not found — skipping")
 
     logger.info(f"Loading METAR from {metar_path}...")
-    metar_df = pd.read_parquet(metar_path)
+    try:
+        metar_df = pd.read_parquet(metar_path, filters=_pq_date_filters(start_date, end_date))
+    except Exception:
+        metar_df = pd.read_parquet(metar_path)
     metar_df["timestamp"] = pd.to_datetime(metar_df["timestamp"], utc=True)
     if start_date:
         metar_df = metar_df[metar_df["timestamp"] >= pd.Timestamp(start_date, tz="UTC")]
