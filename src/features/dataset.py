@@ -207,11 +207,11 @@ class CropOSDataset(Dataset):
         self.threshold_mm = threshold_mm
 
         # ── 1. filter ERA5 to manageable node set ──────────────────────────
-        logger.info("Filtering ERA5 to nodes near stations...")
+        print("[DS] Filtering ERA5 to nodes near stations...", flush=True)
         era5_df = _filter_era5_by_radius(era5_df, station_coords, era5_node_radius_km)
 
         # ── 2. add temporal features to ERA5 ──────────────────────────────
-        logger.info("Adding temporal features to ERA5...")
+        print("[DS] Adding temporal features to ERA5...", flush=True)
         era5_df = prepare_era5_features(era5_df, variables=era5_vars)
         era5_feature_cols = era5_vars + ["sin_hour", "cos_hour", "sin_doy", "cos_doy"]
         self.era5_feature_cols = era5_feature_cols
@@ -236,7 +236,7 @@ class CropOSDataset(Dataset):
         # Sort by (timestamp, lat, lon) so within-group row order matches
         # unique_pts (which is also sorted by lat, lon). This makes the numpy
         # array at each timestamp consistently index-aligned with _era5_lat/_era5_lon.
-        logger.info("Building ERA5 timestamp lookup (this may take ~30 s)...")
+        print("[DS] Building ERA5 timestamp lookup (this may take ~30 s)...", flush=True)
         era5_df["timestamp"] = pd.to_datetime(era5_df["timestamp"], utc=True)
         era5_df = era5_df.sort_values(["timestamp", "lat", "lon"])
 
@@ -245,10 +245,16 @@ class CropOSDataset(Dataset):
             self._era5_by_ts[ts] = (
                 grp[era5_feature_cols].values.astype(np.float32)
             )
-        logger.info(f"ERA5 lookup built: {len(self._era5_by_ts):,} timestamps")
+        _era5_keys = list(self._era5_by_ts.keys())
+        print(
+            f"[DS] ERA5 lookup: {len(self._era5_by_ts):,} timestamps | "
+            f"range: {min(_era5_keys) if _era5_keys else 'EMPTY'} → "
+            f"{max(_era5_keys) if _era5_keys else 'EMPTY'}",
+            flush=True,
+        )
 
         # ── 6. build METAR lookup dict {timestamp → (n_stations, n_metar_feat)} ─
-        logger.info("Building METAR timestamp lookup...")
+        print("[DS] Building METAR timestamp lookup...", flush=True)
         metar_df = metar_df.copy()
         metar_df["timestamp"] = pd.to_datetime(metar_df["timestamp"], utc=True)
 
@@ -270,7 +276,13 @@ class CropOSDataset(Dataset):
             )
             # NaN → 0: missing observation treated as sensor-absent (same as DropNode)
             self._metar_by_ts[ts] = np.nan_to_num(arr, nan=0.0)
-        logger.info(f"METAR lookup built: {len(self._metar_by_ts):,} timestamps")
+        _metar_keys = list(self._metar_by_ts.keys())
+        print(
+            f"[DS] METAR lookup: {len(self._metar_by_ts):,} timestamps | "
+            f"range: {min(_metar_keys) if _metar_keys else 'EMPTY'} → "
+            f"{max(_metar_keys) if _metar_keys else 'EMPTY'}",
+            flush=True,
+        )
 
         # ── METAR data-quality check ─────────────────────────────────────────
         if self._metar_by_ts:
@@ -292,7 +304,7 @@ class CropOSDataset(Dataset):
         del metar_df  # free memory — all data is in _metar_by_ts
 
         # ── 7. build label array [n_ts, n_stations, n_horizons] ────────────
-        logger.info("Building ERA5 precipitation label table...")
+        print("[DS] Building ERA5 precipitation label table...", flush=True)
         label_df = _build_era5_label_df(
             era5_df, station_coords, station_order
         )
@@ -303,6 +315,28 @@ class CropOSDataset(Dataset):
             set(self._era5_by_ts) & set(self._metar_by_ts),
             key=lambda t: t,
         )
+        print(
+            f"[DS] ERA5∩METAR intersection: {len(common_ts):,} timestamps | "
+            f"range: {common_ts[0] if common_ts else 'EMPTY'} → "
+            f"{common_ts[-1] if common_ts else 'EMPTY'}",
+            flush=True,
+        )
+        if len(common_ts) == 0:
+            print(
+                f"[DS] DIAGNOSIS: Intersection is EMPTY.\n"
+                f"     ERA5 keys: {len(self._era5_by_ts):,}  "
+                f"(sample: {list(self._era5_by_ts.keys())[:3]})\n"
+                f"     METAR keys: {len(self._metar_by_ts):,}  "
+                f"(sample: {list(self._metar_by_ts.keys())[:3]})\n"
+                f"     Possible causes:\n"
+                f"     1) era5_recent.parquet does not cover {horizons_h} — "
+                f"check its max timestamp above.\n"
+                f"     2) metar_thai.parquet was downloaded with an old end_date — "
+                f"check its max timestamp above.\n"
+                f"     3) METAR timestamps are sub-hourly (not rounded to :00) — "
+                f"compare sample keys above.",
+                flush=True,
+            )
         # Keep only timestamps for which ALL future label timestamps exist
         label_ts = set(label_df.index.get_level_values("timestamp"))
         valid_ts: list[pd.Timestamp] = []
@@ -312,9 +346,9 @@ class CropOSDataset(Dataset):
 
         self.timestamps: list[pd.Timestamp] = valid_ts
         n_ts = len(valid_ts)
-        logger.info(f"Valid training timestamps: {n_ts:,}")
+        print(f"[DS] Valid timestamps (ERA5∩METAR with full label horizon): {n_ts:,}", flush=True)
 
-        logger.info("Pre-computing label array...")
+        print("[DS] Pre-computing label array...", flush=True)
         label_arr = np.zeros((n_ts, self.n_stations, self.n_horizons), dtype=np.float32)
         for h_idx, h in enumerate(horizons_h):
             h_delta = pd.Timedelta(hours=h)
@@ -343,7 +377,7 @@ class CropOSDataset(Dataset):
             )
 
         # ── 8. pre-build fixed edge tensors ───────────────────────────────
-        logger.info("Building fixed graph edges...")
+        print("[DS] Building fixed graph edges...", flush=True)
         era5_node_list = [
             {"lat": float(self._era5_lat[i]), "lon": float(self._era5_lon[i]),
              "feats": [0.0] * self.n_era5_features}
@@ -367,7 +401,7 @@ class CropOSDataset(Dataset):
         self._edge_era5_to_metar = base["era5", "to", "metar"].edge_index
         self._edge_era5_to_farm  = base["era5", "to", "farm"].edge_index
         self._edge_metar_to_farm = base["metar", "to", "farm"].edge_index
-        logger.info("Dataset ready.")
+        print("[DS] Dataset ready.", flush=True)
 
     # ── Dataset interface ─────────────────────────────────────────────────────
 
@@ -453,7 +487,7 @@ def load_dataset_from_parquets(
             filters.append(("timestamp", "<=", pd.Timestamp(end, tz="UTC")))
         return filters if filters else None
 
-    logger.info(f"Loading ERA5 from {era5_path}...")
+    print(f"[DATA] Loading ERA5 from {era5_path} (filter: {start_date} – {end_date})...", flush=True)
     try:
         era5_df = pd.read_parquet(era5_path, filters=_pq_date_filters(start_date, end_date))
     except Exception:
@@ -463,10 +497,17 @@ def load_dataset_from_parquets(
         era5_df = era5_df[era5_df["timestamp"] >= pd.Timestamp(start_date, tz="UTC")]
     if end_date:
         era5_df = era5_df[era5_df["timestamp"] <= pd.Timestamp(end_date, tz="UTC")]
+    _era5_ts = era5_df["timestamp"]
+    print(
+        f"[DATA] ERA5 base: {len(era5_df):,} rows | "
+        f"ts range: {_era5_ts.min()} → {_era5_ts.max()} | "
+        f"unique ts: {_era5_ts.nunique():,}",
+        flush=True,
+    )
 
     # Merge northern top-up if available (adds grid points for Bangkok, Chiang Mai, etc.)
     if era5_north_path is not None and Path(era5_north_path).exists():
-        logger.info(f"Loading ERA5 north top-up from {era5_north_path}...")
+        print(f"[DATA] Loading ERA5 north top-up from {era5_north_path}...", flush=True)
         try:
             north_df = pd.read_parquet(
                 era5_north_path, filters=_pq_date_filters(start_date, end_date)
@@ -480,16 +521,20 @@ def load_dataset_from_parquets(
             north_df = north_df[north_df["timestamp"] <= pd.Timestamp(end_date, tz="UTC")]
         era5_df = pd.concat([era5_df, north_df], ignore_index=True)
         del north_df
-        logger.info(
-            f"ERA5 (south + north): {len(era5_df):,} rows, "
-            f"{era5_df[['lat','lon']].drop_duplicates().__len__()} unique grid points"
+        print(
+            f"[DATA] ERA5 (south + north): {len(era5_df):,} rows, "
+            f"{era5_df[['lat','lon']].drop_duplicates().__len__()} unique grid points",
+            flush=True,
         )
     else:
-        logger.info(f"ERA5: {len(era5_df):,} rows, {era5_df['timestamp'].nunique():,} timestamps")
+        print(
+            f"[DATA] ERA5: {len(era5_df):,} rows, {era5_df['timestamp'].nunique():,} timestamps",
+            flush=True,
+        )
 
     # Merge recent ERA5 top-up if available (extends training set with newer timestamps)
     if era5_recent_path is not None and Path(era5_recent_path).exists():
-        logger.info(f"Loading ERA5 recent top-up from {era5_recent_path}...")
+        print(f"[DATA] Loading ERA5 recent from {era5_recent_path}...", flush=True)
         try:
             recent_era5_df = pd.read_parquet(
                 era5_recent_path, filters=_pq_date_filters(start_date, end_date)
@@ -497,6 +542,14 @@ def load_dataset_from_parquets(
         except Exception:
             recent_era5_df = pd.read_parquet(era5_recent_path)
         recent_era5_df["timestamp"] = pd.to_datetime(recent_era5_df["timestamp"], utc=True)
+        # Show full range before filtering so we can see if the file even has recent data
+        _rec_min_raw = recent_era5_df["timestamp"].min() if len(recent_era5_df) > 0 else "EMPTY"
+        _rec_max_raw = recent_era5_df["timestamp"].max() if len(recent_era5_df) > 0 else "EMPTY"
+        print(
+            f"[DATA] ERA5 recent (raw from file): {len(recent_era5_df):,} rows | "
+            f"full range: {_rec_min_raw} → {_rec_max_raw}",
+            flush=True,
+        )
         if start_date:
             recent_era5_df = recent_era5_df[
                 recent_era5_df["timestamp"] >= pd.Timestamp(start_date, tz="UTC")
@@ -505,23 +558,94 @@ def load_dataset_from_parquets(
             recent_era5_df = recent_era5_df[
                 recent_era5_df["timestamp"] <= pd.Timestamp(end_date, tz="UTC")
             ]
+        _rec_min_filt = recent_era5_df["timestamp"].min() if len(recent_era5_df) > 0 else "EMPTY"
+        _rec_max_filt = recent_era5_df["timestamp"].max() if len(recent_era5_df) > 0 else "EMPTY"
+        print(
+            f"[DATA] ERA5 recent (after {start_date}–{end_date} filter): "
+            f"{len(recent_era5_df):,} rows | range: {_rec_min_filt} → {_rec_max_filt}",
+            flush=True,
+        )
+        if len(recent_era5_df) == 0:
+            print(
+                f"[DATA] WARNING: era5_recent.parquet has NO rows for the requested period "
+                f"({start_date} – {end_date}). Its actual data only goes up to {_rec_max_raw}. "
+                f"Re-run the ERA5 Extend workflow and wait for it to reach {start_date}.",
+                flush=True,
+            )
         era5_df = pd.concat([era5_df, recent_era5_df], ignore_index=True)
         del recent_era5_df
-        logger.info(f"ERA5 (base + recent): {len(era5_df):,} rows")
+        _era5_ts2 = era5_df["timestamp"]
+        print(
+            f"[DATA] ERA5 (base + recent): {len(era5_df):,} rows | "
+            f"ts range: {_era5_ts2.min()} → {_era5_ts2.max()}",
+            flush=True,
+        )
     elif era5_recent_path is not None:
-        logger.debug(f"era5_recent_path {era5_recent_path} not found — skipping")
+        print(
+            f"[DATA] WARNING: era5_recent_path={era5_recent_path} not found on disk — skipping. "
+            f"Validation ERA5 will likely be empty for {start_date}–{end_date}.",
+            flush=True,
+        )
 
-    logger.info(f"Loading METAR from {metar_path}...")
+    print(f"[DATA] Loading METAR from {metar_path}...", flush=True)
     try:
         metar_df = pd.read_parquet(metar_path, filters=_pq_date_filters(start_date, end_date))
     except Exception:
         metar_df = pd.read_parquet(metar_path)
     metar_df["timestamp"] = pd.to_datetime(metar_df["timestamp"], utc=True)
+    _met_min_raw = metar_df["timestamp"].min() if len(metar_df) > 0 else "EMPTY"
+    _met_max_raw = metar_df["timestamp"].max() if len(metar_df) > 0 else "EMPTY"
+    print(
+        f"[DATA] METAR (raw from file): {len(metar_df):,} rows | "
+        f"full range: {_met_min_raw} → {_met_max_raw} | "
+        f"stations: {metar_df['station'].nunique() if len(metar_df) > 0 else 0}",
+        flush=True,
+    )
     if start_date:
         metar_df = metar_df[metar_df["timestamp"] >= pd.Timestamp(start_date, tz="UTC")]
     if end_date:
         metar_df = metar_df[metar_df["timestamp"] <= pd.Timestamp(end_date, tz="UTC")]
-    logger.info(f"METAR: {len(metar_df):,} rows, {metar_df['station'].nunique()} stations")
+    _met_min_filt = metar_df["timestamp"].min() if len(metar_df) > 0 else "EMPTY"
+    _met_max_filt = metar_df["timestamp"].max() if len(metar_df) > 0 else "EMPTY"
+    print(
+        f"[DATA] METAR (after {start_date}–{end_date} filter): "
+        f"{len(metar_df):,} rows | range: {_met_min_filt} → {_met_max_filt} | "
+        f"stations: {metar_df['station'].nunique() if len(metar_df) > 0 else 0}",
+        flush=True,
+    )
+    if len(metar_df) == 0:
+        print(
+            f"[DATA] WARNING: metar_thai.parquet has NO rows for {start_date}–{end_date}. "
+            f"Its data only goes up to {_met_max_raw}. "
+            f"Re-run the Download Training Data workflow with end_date extended to cover this period.",
+            flush=True,
+        )
+
+    # Round sub-hourly METAR timestamps to the nearest hour so they align with ERA5.
+    # Iowa State ASOS routine observations are at :53-:56 past the hour; ERA5 is on the hour.
+    # Without rounding, the ERA5∩METAR set intersection is empty for every split.
+    # If timestamps are already at :00 this is a no-op. Keep the latest obs per (hour, station)
+    # so special observations don't create duplicates that break set_index("station").
+    if len(metar_df) > 0:
+        _sample_pre_round = metar_df["timestamp"].head(3).tolist()
+        metar_df["timestamp"] = metar_df["timestamp"].dt.round("h")
+        _sample_post_round = metar_df["timestamp"].head(3).tolist()
+        print(
+            f"[DATA] METAR timestamp rounding (pre→post hour): "
+            f"{_sample_pre_round} → {_sample_post_round}",
+            flush=True,
+        )
+        metar_df = (
+            metar_df
+            .sort_values("timestamp")
+            .drop_duplicates(subset=["timestamp", "station"], keep="last")
+            .reset_index(drop=True)
+        )
+        print(
+            f"[DATA] METAR after dedup: {len(metar_df):,} rows | "
+            f"unique (ts,stn) pairs per-hour",
+            flush=True,
+        )
 
     return CropOSDataset(
         era5_df=era5_df,

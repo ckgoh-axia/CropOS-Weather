@@ -1,0 +1,104 @@
+name: Update METAR Data
+
+on:
+  workflow_dispatch:
+    inputs:
+      end_date:
+        description: "End date (YYYY-MM-DD) — defaults to today"
+        required: false
+        default: ""
+
+jobs:
+  update-metar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install \
+            pandas numpy pyyaml \
+            huggingface-hub pyarrow httpx
+
+      - name: Update METAR through current year
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          python - <<'PYEOF'
+          import os
+          import subprocess
+          import sys
+          from datetime import date
+          from pathlib import Path
+
+          end_input = "${{ github.event.inputs.end_date }}".strip()
+          end_date = end_input if end_input else str(date.today())
+          print(f"Updating METAR: 2015-01-01 → {end_date}")
+
+          subprocess.check_call([sys.executable, "-m", "pip", "install", "httpx", "-q"])
+
+          import pandas as pd
+          from huggingface_hub import HfApi, hf_hub_download
+          from src.ingestion.metar import fetch_all_thai_stations
+
+          token = os.environ["HF_TOKEN"]
+          api = HfApi()
+          username = api.whoami(token=token)["name"]
+          repo_id = f"{username}/cropos-data"
+
+          outdir = Path("data/raw")
+          outdir.mkdir(parents=True, exist_ok=True)
+
+          existing_df = None
+          try:
+              local = hf_hub_download(
+                  repo_id=repo_id, filename="metar_thai.parquet",
+                  repo_type="dataset", token=token, local_dir=str(outdir),
+              )
+              existing_df = pd.read_parquet(local)
+              existing_df["timestamp"] = pd.to_datetime(existing_df["timestamp"], utc=True)
+              existing_max = existing_df["timestamp"].max()
+              resume_start = str((existing_max - pd.Timedelta(days=365)).date())
+              print(f"Existing METAR through {existing_max.date()} — fetching from {resume_start}")
+          except Exception as exc:
+              print(f"No existing file — fetching full history: {exc}")
+              resume_start = "2015-01-01"
+
+          new_df = fetch_all_thai_stations(resume_start, end_date)
+          print(f"Fetched {len(new_df):,} new rows ({resume_start} → {end_date})")
+
+          if existing_df is not None:
+              overlap_start = pd.Timestamp(resume_start, tz="UTC")
+              existing_df = existing_df[existing_df["timestamp"] < overlap_start]
+              combined = pd.concat([existing_df, new_df], ignore_index=True)
+          else:
+              combined = new_df
+
+          combined["timestamp"] = pd.to_datetime(combined["timestamp"], utc=True).dt.round("h")
+          combined = (
+              combined
+              .sort_values("timestamp")
+              .drop_duplicates(subset=["timestamp", "station"], keep="last")
+              .reset_index(drop=True)
+          )
+
+          out_path = outdir / "metar_thai.parquet"
+          combined.to_parquet(out_path, index=False)
+          print(f"Saved {len(combined):,} rows | {combined['timestamp'].min()} → {combined['timestamp'].max()}")
+
+          api.upload_file(
+              path_or_fileobj=str(out_path),
+              path_in_repo="metar_thai.parquet",
+              repo_id=repo_id,
+              repo_type="dataset",
+              token=token,
+          )
+          print("metar_thai.parquet pushed to HuggingFace ✓")
+          PYEOF
