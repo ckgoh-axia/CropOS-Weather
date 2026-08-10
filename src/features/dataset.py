@@ -329,11 +329,18 @@ class CropOSDataset(Dataset):
                     except KeyError:
                         pass  # remains 0; caller may apply mask if needed
         self._label_arr = label_arr
-        logger.info(
-            f"Rain fraction across labels: "
-            f"{float(label_arr.mean()):.3f}  "
-            f"(threshold={threshold_mm} mm)"
-        )
+        if label_arr.size == 0:
+            logger.warning(
+                "EMPTY DATASET: no valid timestamps found for this split. "
+                "ERA5 and METAR timestamps do not overlap, or all label "
+                "horizon timestamps are missing. Training will be a no-op."
+            )
+        else:
+            logger.info(
+                f"Rain fraction across labels: "
+                f"{float(label_arr.mean()):.3f}  "
+                f"(threshold={threshold_mm} mm)"
+            )
 
         # ── 8. pre-build fixed edge tensors ───────────────────────────────
         logger.info("Building fixed graph edges...")

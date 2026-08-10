@@ -97,6 +97,7 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
             horizons_h=horizons_h,
             threshold_mm=threshold_mm,
             era5_north_path=era5_north_path,
+            era5_recent_path=era5_recent_path,  # needed for 2023-2024 training data
         )
         val_ds = load_dataset_from_parquets(
             era5_path=data_dir / "era5_thailand.parquet",
@@ -152,6 +153,21 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
     logger.info(
         f"Train: {len(train_ds):,} samples  |  Val: {len(val_ds):,} samples"
     )
+    if len(train_ds) == 0:
+        raise RuntimeError(
+            "Training dataset is EMPTY. ERA5 and METAR timestamps do not overlap "
+            "for the training split. Check that metar_thai.parquet covers the "
+            f"training period ({dcfg['training_start']} – {dcfg['training_end']}) "
+            "and that era5_thailand.parquet has matching UTC timestamps."
+        )
+    if len(val_ds) == 0:
+        raise RuntimeError(
+            "Validation dataset is EMPTY. ERA5 and METAR timestamps do not overlap "
+            "for the validation split. Check that era5_recent.parquet covers "
+            f"({dcfg['validation_start']} – {dcfg['validation_end']}) and that "
+            "METAR data exists for this period. era5_recent.parquet may be "
+            "incomplete — re-run the ERA5 Extend workflow if needed."
+        )
 
     # ── fit feature scalers on training data ──────────────────────────────────
     # Scalers are fit on training set ONLY; saved so inference uses identical scaling.
@@ -333,7 +349,7 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
                 best_val_loss = val_loss
                 patience_counter = 0
                 torch.save(model.state_dict(), "checkpoints/best_model.pt")
-                mlflow.pytorch.log_model(model, "model")
+                mlflow.pytorch.log_model(model, "model", serialization_format="cloudpickle")
                 logger.info(f"  ✓ new best val loss: {val_loss:.4f}")
             else:
                 patience_counter += 1
