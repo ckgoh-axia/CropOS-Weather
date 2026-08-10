@@ -20,6 +20,14 @@ jobs:
 
       - name: Install dependencies
         run: |
+          # torch CPU-only wheel (no CUDA needed for unit tests)
+          pip install torch==2.2.1 --index-url https://download.pytorch.org/whl/cpu
+
+          # PyG + sparse ops — CPU wheels keyed to torch 2.2.0+cpu
+          pip install torch-geometric
+          pip install torch-scatter torch-sparse torch-cluster \
+            -f https://data.pyg.org/whl/torch-2.2.0+cpu.html
+
           pip install \
             mlflow \
             openmeteo-requests requests-cache retry-requests \
