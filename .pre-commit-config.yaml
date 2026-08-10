@@ -2,7 +2,8 @@ repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.3.0
     hooks:
-      - id: ruff
+      - id: ruff-format   # auto-formats first (fixes E501, trailing commas, etc.)
+      - id: ruff           # lints second (fixes imports, zip-strict, etc.)
         args: [--fix]
   - repo: https://github.com/PyCQA/bandit
     rev: 1.7.7

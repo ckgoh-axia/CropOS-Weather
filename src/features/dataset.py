@@ -461,7 +461,9 @@ def load_dataset_from_parquets(
     if era5_north_path is not None and Path(era5_north_path).exists():
         logger.info(f"Loading ERA5 north top-up from {era5_north_path}...")
         try:
-            north_df = pd.read_parquet(era5_north_path, filters=_pq_date_filters(start_date, end_date))
+            north_df = pd.read_parquet(
+                era5_north_path, filters=_pq_date_filters(start_date, end_date)
+            )
         except Exception:
             north_df = pd.read_parquet(era5_north_path)
         north_df["timestamp"] = pd.to_datetime(north_df["timestamp"], utc=True)
@@ -482,7 +484,9 @@ def load_dataset_from_parquets(
     if era5_recent_path is not None and Path(era5_recent_path).exists():
         logger.info(f"Loading ERA5 recent top-up from {era5_recent_path}...")
         try:
-            recent_era5_df = pd.read_parquet(era5_recent_path, filters=_pq_date_filters(start_date, end_date))
+            recent_era5_df = pd.read_parquet(
+                era5_recent_path, filters=_pq_date_filters(start_date, end_date)
+            )
         except Exception:
             recent_era5_df = pd.read_parquet(era5_recent_path)
         recent_era5_df["timestamp"] = pd.to_datetime(recent_era5_df["timestamp"], utc=True)
