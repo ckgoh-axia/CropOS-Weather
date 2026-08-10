@@ -349,7 +349,12 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
                 best_val_loss = val_loss
                 patience_counter = 0
                 torch.save(model.state_dict(), "checkpoints/best_model.pt")
-                mlflow.pytorch.log_model(model, "model", serialization_format="cloudpickle")
+                try:
+                    mlflow.pytorch.log_model(model, "model")
+                except Exception as _mlf_exc:
+                    logger.warning(
+                        f"mlflow.pytorch.log_model failed (non-fatal): {_mlf_exc}"
+                    )
                 logger.info(f"  ✓ new best val loss: {val_loss:.4f}")
             else:
                 patience_counter += 1

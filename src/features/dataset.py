@@ -487,7 +487,10 @@ def load_dataset_from_parquets(
             filters.append(("timestamp", "<=", pd.Timestamp(end, tz="UTC")))
         return filters if filters else None
 
-    print(f"[DATA] Loading ERA5 from {era5_path} (filter: {start_date} – {end_date})...", flush=True)
+    print(
+        f"[DATA] Loading ERA5 from {era5_path} (filter: {start_date} – {end_date})...",
+        flush=True,
+    )
     try:
         era5_df = pd.read_parquet(era5_path, filters=_pq_date_filters(start_date, end_date))
     except Exception:
@@ -617,7 +620,8 @@ def load_dataset_from_parquets(
         print(
             f"[DATA] WARNING: metar_thai.parquet has NO rows for {start_date}–{end_date}. "
             f"Its data only goes up to {_met_max_raw}. "
-            f"Re-run the Download Training Data workflow with end_date extended to cover this period.",
+            f"Re-run the Download Training Data workflow with "
+            f"end_date extended to cover this period.",
             flush=True,
         )
 

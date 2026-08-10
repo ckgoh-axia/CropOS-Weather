@@ -17,7 +17,7 @@ echo "=== Installing dependencies ==="
 # blinker is distutils-installed in the RunPod base image — pip can't uninstall it
 # cleanly, so any package that tries to upgrade it (e.g. mlflow) aborts with an error.
 # Force-reinstall blinker via pip first so subsequent installs see a pip-owned copy.
-pip install --ignore-installed blinker -q
+pip install --ignore-installed --force-reinstall blinker -q
 
 pip install wandb -q
 
