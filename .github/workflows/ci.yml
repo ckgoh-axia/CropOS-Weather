@@ -20,22 +20,27 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install poetry
-          poetry install
+          pip install \
+            mlflow \
+            openmeteo-requests requests-cache retry-requests \
+            pandas numpy xarray scikit-learn \
+            fastapi uvicorn pydantic httpx \
+            python-dotenv "huggingface-hub>=0.21" pyarrow pyyaml tqdm \
+            ruff bandit pytest pytest-asyncio pytest-cov respx
 
       - name: Lint with ruff
-        run: poetry run ruff check src/ tests/
+        run: ruff check src/ tests/
 
       - name: Security scan with bandit
-        run: poetry run bandit -r src/ -ll -q
+        run: bandit -r src/ -ll -q
 
       - name: Run unit tests with coverage
         run: |
-          poetry run pytest tests/unit/ tests/validation/ -v \
+          pytest tests/unit/ tests/validation/ -v \
             --cov=src --cov-report=term-missing --cov-fail-under=68
 
       - name: Run integration tests
-        run: poetry run pytest tests/integration/ -v
+        run: pytest tests/integration/ -v
 
       - name: Check for secrets in diff
         uses: trufflesecurity/trufflehog@main
