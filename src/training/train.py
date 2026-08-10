@@ -1,4 +1,4 @@
-"""Training loop for CropOSGNN with MLflow tracking.
+"""Training loop for CropOSGNN with W&B + MLflow tracking.
 
 Run
 ---
@@ -10,6 +10,7 @@ Environment variables
 ---------------------
     HF_TOKEN            — HuggingFace read token (required unless --local)
     HF_DATASET_REPO     — Override auto-detected repo id
+    WANDB_API_KEY       — Weights & Biases key (optional; skipped if absent)
     MLFLOW_TRACKING_URI — MLflow backend (default: local mlruns/)
 """
 from __future__ import annotations
@@ -265,6 +266,32 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
     )
     gradient_clip = tcfg.get("gradient_clip", 1.0)
 
+    # ── W&B init (optional — skipped if WANDB_API_KEY not set) ──────────────
+    _wandb_run = None
+    if os.environ.get("WANDB_API_KEY"):
+        try:
+            import wandb
+            _wandb_run = wandb.init(
+                project="cropos-gnn-thai",
+                config={
+                    "era5_in":        era5_in,
+                    "metar_in":       metar_in,
+                    "hidden":         gnn_cfg["hidden_channels"],
+                    "num_layers":     gnn_cfg["num_layers"],
+                    "lr":             tcfg["learning_rate"],
+                    "batch_size":     tcfg["batch_size"],
+                    "era5_radius_km": era5_node_radius_km,
+                    "loss":           "brier_csi",
+                    "device":         str(device),
+                },
+            )
+            print(f"W&B run: {_wandb_run.url}", flush=True)
+        except Exception as _wb_exc:
+            print(f"W&B init failed (non-fatal): {_wb_exc}", flush=True)
+            _wandb_run = None
+    else:
+        print("WANDB_API_KEY not set — skipping W&B logging", flush=True)
+
     # ── MLflow run ────────────────────────────────────────────────────────────
     mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI", "mlruns"))
     mlflow.set_experiment("cropos-gnn-thai")
@@ -327,21 +354,30 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
                 _preds_cat = np.concatenate(_val_preds_all, axis=0)
                 _pred_mean = float(_preds_cat.mean())
                 _pred_std  = float(_preds_cat.std())
-                logger.info(
+                print(
                     f"  val preds: mean={_pred_mean:.4f}  std={_pred_std:.4f}  "
-                    f"min={float(_preds_cat.min()):.4f}  max={float(_preds_cat.max()):.4f}"
+                    f"min={float(_preds_cat.min()):.4f}  max={float(_preds_cat.max()):.4f}",
+                    flush=True,
                 )
                 if _pred_std < 0.005:
-                    logger.warning(
-                        f"  val pred std={_pred_std:.5f} — model predicting constant value. "
-                        f"Check METAR data quality and ERA5 recent coverage."
+                    print(
+                        f"  WARNING val pred std={_pred_std:.5f} — model predicting "
+                        f"constant value. Check METAR data quality and ERA5 coverage.",
+                        flush=True,
                     )
 
             mlflow.log_metrics(
                 {"train_loss": train_loss, "val_loss": val_loss}, step=epoch
             )
-            logger.info(
-                f"Epoch {epoch:03d}: train={train_loss:.4f}  val={val_loss:.4f}"
+            if _wandb_run is not None:
+                _wandb_run.log(
+                    {"train_loss": train_loss, "val_loss": val_loss,
+                     "epoch": epoch},
+                    step=epoch,
+                )
+            print(
+                f"Epoch {epoch:03d}: train={train_loss:.4f}  val={val_loss:.4f}",
+                flush=True,
             )
 
             # ── early stopping + checkpoint ───────────────────────────────
@@ -352,19 +388,29 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
                 try:
                     mlflow.pytorch.log_model(model, "model")
                 except Exception as _mlf_exc:
-                    logger.warning(
-                        f"mlflow.pytorch.log_model failed (non-fatal): {_mlf_exc}"
+                    print(
+                        f"  mlflow.pytorch.log_model failed (non-fatal): {_mlf_exc}",
+                        flush=True,
                     )
-                logger.info(f"  ✓ new best val loss: {val_loss:.4f}")
+                print(f"  ✓ new best val loss: {val_loss:.4f}", flush=True)
             else:
                 patience_counter += 1
                 if patience_counter >= tcfg["early_stopping_patience"]:
-                    logger.info(f"Early stopping at epoch {epoch} (patience exhausted)")
+                    print(
+                        f"Early stopping at epoch {epoch} (patience exhausted)",
+                        flush=True,
+                    )
                     break
 
-    logger.info(f"Training complete. Best val loss: {best_val_loss:.4f}")
-    logger.info("Model saved to checkpoints/best_model.pt")
-    logger.info("Scalers saved to checkpoints/era5_scaler.npz  checkpoints/metar_scaler.npz")
+    print(f"Training complete. Best val loss: {best_val_loss:.4f}", flush=True)
+    if _wandb_run is not None:
+        _wandb_run.summary["best_val_loss"] = best_val_loss
+        _wandb_run.finish()
+    print("Model saved to checkpoints/best_model.pt", flush=True)
+    print(
+        "Scalers saved to checkpoints/era5_scaler.npz  checkpoints/metar_scaler.npz",
+        flush=True,
+    )
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
