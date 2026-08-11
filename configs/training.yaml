@@ -7,5 +7,5 @@ gradient_clip: 1.0
 loss:
   brier_weight: 0.7
   csi_weight: 0.3
-  pos_weight: 16.5   # n_dry/n_rain ≈ 17:1 at 5.7% rain rate (ERA5 ≥1mm/hr)
+  pos_weight: 3.0    # lowered from 16.5 — full ratio distorts Brier calibration (BSS -4)
   reg_weight: 0.2    # only active when dual_head: true
