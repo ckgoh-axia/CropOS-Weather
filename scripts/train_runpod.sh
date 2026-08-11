@@ -1,6 +1,8 @@
 #!/bin/bash
-# RunPod pod startup script — clone repo, install deps, pull data, train, register model
-set -e
+# RunPod pod startup script — clone repo, install deps, pull data, train
+# HF checkpoint upload is handled inside train.py at the end of training.
+# set -e intentionally omitted so a training crash produces a full error log
+# rather than silently killing the script mid-run.
 
 echo "=== CropOS Training — RunPod ==="
 apt-get install -y git -q
@@ -83,10 +85,15 @@ mkdir -p checkpoints
 export HF_TOKEN="${HF_TOKEN}"
 export MLFLOW_ALLOW_FILE_STORE=true
 
-# -u disables Python output buffering so logs appear before the process is killed.
-# 2>&1 merges stderr (logger output) into stdout so RunPod captures it.
+# -u disables Python output buffering so logs appear immediately.
+# 2>&1 merges stderr into stdout so RunPod captures everything.
+# train.py uploads best_model.pt to HF at the end if HF_TOKEN is set.
+echo "=== Starting training ==="
 PYTHONUNBUFFERED=1 python -u -m src.training.train --local data/raw 2>&1
+TRAIN_EXIT=$?
 
-echo "=== Registering model to HuggingFace Hub ==="
-python scripts/register_model.py --checkpoint checkpoints/best_model.pt
-echo "=== Done ==="
+if [ $TRAIN_EXIT -ne 0 ]; then
+    echo "=== Training exited with code $TRAIN_EXIT — check logs above ==="
+else
+    echo "=== Training complete ==="
+fi
