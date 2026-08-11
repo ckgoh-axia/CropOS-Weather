@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from src.training.loss import BrierCSILoss
+from src.training.loss import BrierCSILoss, DualHeadLoss
 
 
 def test_loss_perfect_prediction_is_near_zero():
@@ -60,3 +60,36 @@ def test_loss_all_dry_still_finite():
     loss = loss_fn(pred, target)
     assert torch.isfinite(loss)
     assert loss.item() >= 0
+
+
+def test_dual_head_loss_returns_scalar():
+    loss_fn = DualHeadLoss(brier_weight=0.5, csi_weight=0.3, reg_weight=0.2)
+    probs = torch.rand(4, 3)
+    labels = (torch.rand(4, 3) > 0.5).float()
+    mm_pred = torch.rand(4, 3).abs()
+    mm_true = torch.rand(4, 3).abs()
+    loss = loss_fn(probs, labels, mm_pred, mm_true)
+    assert loss.shape == torch.Size([])
+
+
+def test_dual_head_loss_without_mm_equals_brier_csi():
+    """If reg_weight=0, DualHeadLoss must match BrierCSILoss exactly."""
+    brier = BrierCSILoss(brier_weight=0.7, csi_weight=0.3)
+    dual = DualHeadLoss(brier_weight=0.7, csi_weight=0.3, reg_weight=0.0)
+    probs = torch.rand(6, 4)
+    labels = (torch.rand(6, 4) > 0.5).float()
+    mm_pred = torch.zeros(6, 4)
+    mm_true = torch.zeros(6, 4)
+    assert abs(float(brier(probs, labels)) - float(dual(probs, labels, mm_pred, mm_true))) < 1e-5
+
+
+def test_dual_head_loss_backward():
+    loss_fn = DualHeadLoss(brier_weight=0.5, csi_weight=0.3, reg_weight=0.2)
+    probs = torch.rand(4, 3, requires_grad=True)
+    labels = (torch.rand(4, 3) > 0.5).float()
+    mm_pred = torch.rand(4, 3, requires_grad=True)
+    mm_true = torch.rand(4, 3).abs()
+    loss = loss_fn(probs, labels, mm_pred, mm_true)
+    loss.backward()
+    assert probs.grad is not None
+    assert mm_pred.grad is not None
