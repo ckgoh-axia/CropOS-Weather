@@ -2,15 +2,28 @@ gnn:
   # Feature dimensions — must match src/features/engineer.py constants
   #
   # era5_in = 11: 7 ERA5 surface vars + 4 temporal (sin/cos hour/doy)
+  #   Actual input dim = era5_in * history_steps (temporal stacking)
   #
   # metar_in = 9: real-time METAR observations from Iowa State ASOS
   #   precip_mm, rain_event, tmpf, dwpf, relh, drct, sknt, alti, vsby
   #   These are the ONLY features available in production at inference time.
+  #   Actual input dim = metar_in * history_steps
   era5_in: 11
   metar_in: 9
-  hidden_channels: 128
-  num_layers: 2
+  hidden_channels: 256
   dropout: 0.1
   metar_dropout: 0.4
-  edge_radius_km: 100       # ERA5 node filtering radius for dataset construction
-  dual_head: false             # set true to enable mm regression head (adds ~10% params)
+  dual_head: false
+
+  # Temporal history: stack this many hourly snapshots as input features.
+  # Increase for longer memory (48 = full paper spec), decrease to save RAM.
+  history_steps: 6
+
+  # Three-phase local message passing iterations (paper M=4).
+  local_mp_steps: 4
+
+  # Edge construction k values — tune these in sweeps.
+  era5_to_metar_k: 8     # k nearest ERA5 grid points per METAR station (paper o=8)
+  metar_to_metar_k: 4    # k nearest METAR peers per station
+
+  edge_radius_km: 100    # ERA5 spatial filter radius for node selection in dataset

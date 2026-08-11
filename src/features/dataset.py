@@ -178,6 +178,9 @@ class CropOSDataset(Dataset):
         horizons_h:     Forecast horizons in hours (default: [12, 24, 36, 48]).
         era5_node_radius_km: ERA5 nodes included if within this radius of any station.
         threshold_mm:   Precipitation threshold for rain/no-rain label (default 1.0 mm).
+        history_steps:  Number of hourly snapshots to stack as input features.
+        era5_to_metar_k: k nearest ERA5 grid points per METAR station.
+        metar_to_metar_k: k nearest METAR peers per station.
     """
 
     def __init__(
@@ -190,6 +193,9 @@ class CropOSDataset(Dataset):
         horizons_h: List[int] | None = None,
         era5_node_radius_km: float = 100.0,
         threshold_mm: float = 1.0,
+        history_steps: int = 1,
+        era5_to_metar_k: int = 8,
+        metar_to_metar_k: int = 4,
     ) -> None:
         super().__init__()
 
@@ -205,6 +211,9 @@ class CropOSDataset(Dataset):
         self.n_stations = len(station_order)
         self.n_horizons = len(horizons_h)
         self.threshold_mm = threshold_mm
+        self.history_steps = history_steps
+        self.era5_to_metar_k = era5_to_metar_k
+        self.metar_to_metar_k = metar_to_metar_k
 
         # ── 1. filter ERA5 to manageable node set ──────────────────────────
         print("[DS] Filtering ERA5 to nodes near stations...", flush=True)
@@ -342,10 +351,19 @@ class CropOSDataset(Dataset):
             )
         # Keep only timestamps for which ALL future label timestamps exist
         label_ts = set(label_df.index.get_level_values("timestamp"))
+        _td_1h = pd.Timedelta(hours=1)
         valid_ts: list[pd.Timestamp] = []
         for ts in common_ts:
-            if all(ts + pd.Timedelta(hours=h) in label_ts for h in horizons_h):
-                valid_ts.append(ts)
+            # All future label horizons must exist
+            if not all(ts + pd.Timedelta(hours=h) in label_ts for h in horizons_h):
+                continue
+            # All past ERA5 steps must exist (METAR gaps OK — filled with zeros)
+            if history_steps > 1 and not all(
+                ts - step * _td_1h in self._era5_by_ts
+                for step in range(1, history_steps)
+            ):
+                continue
+            valid_ts.append(ts)
 
         self.timestamps: list[pd.Timestamp] = valid_ts
         n_ts = len(valid_ts)
@@ -416,10 +434,17 @@ class CropOSDataset(Dataset):
             metar_nodes=metar_node_list,
             farm_nodes=farm_node_list,
             edge_radius_km=era5_node_radius_km * 2.0,  # broad enough to cover all nearby ERA5
+            era5_to_metar_k=self.era5_to_metar_k,
+            metar_to_metar_k=self.metar_to_metar_k,
         )
         self._edge_era5_to_metar = base["era5", "to", "metar"].edge_index
         self._edge_era5_to_farm  = base["era5", "to", "farm"].edge_index
         self._edge_metar_to_farm = base["metar", "to", "farm"].edge_index
+        self._edge_metar_to_metar = base["metar", "to", "metar"].edge_index
+        # Node positions for relative-position message passing in the GNN
+        self._era5_pos = base["era5"].pos    # (N_era5, 2) [lat, lon]
+        self._metar_pos = base["metar"].pos  # (N_metar, 2)
+        self._farm_pos = base["farm"].pos    # (N_farm, 2)
         print("[DS] Dataset ready.", flush=True)
 
     # ── Dataset interface ─────────────────────────────────────────────────────
@@ -430,21 +455,39 @@ class CropOSDataset(Dataset):
     def __getitem__(self, idx: int) -> HeteroData:
         ts = self.timestamps[idx]
 
-        # ERA5 node features
-        era5_feats = self._era5_by_ts.get(ts)
-        if era5_feats is None:
-            era5_feats = np.zeros(
-                (self.n_era5_nodes, self.n_era5_features), dtype=np.float32
-            )
+        if self.history_steps == 1:
+            # Fast path: single-step, no stacking
+            era5_feats = self._era5_by_ts.get(ts)
+            if era5_feats is None:
+                era5_feats = np.zeros(
+                    (self.n_era5_nodes, self.n_era5_features), dtype=np.float32
+                )
+            metar_feats = self._metar_by_ts.get(ts)
+            if metar_feats is None:
+                metar_feats = np.zeros(
+                    (self.n_stations, self.n_metar_features), dtype=np.float32
+                )
+        else:
+            # Stack T hourly snapshots: oldest-first → newest-last (causal order)
+            _td_1h = pd.Timedelta(hours=1)
+            era5_stack, metar_stack = [], []
+            for step in range(self.history_steps - 1, -1, -1):
+                past_ts = ts - step * _td_1h
+                e = self._era5_by_ts.get(past_ts)
+                if e is None:
+                    e = np.zeros(
+                        (self.n_era5_nodes, self.n_era5_features), dtype=np.float32
+                    )
+                era5_stack.append(e)
+                m = self._metar_by_ts.get(past_ts)
+                if m is None:
+                    m = np.zeros(
+                        (self.n_stations, self.n_metar_features), dtype=np.float32
+                    )
+                metar_stack.append(m)
+            era5_feats = np.concatenate(era5_stack, axis=1)   # (n_nodes, n_feat * T)
+            metar_feats = np.concatenate(metar_stack, axis=1) # (n_stn,   n_feat * T)
 
-        # METAR station features
-        metar_feats = self._metar_by_ts.get(ts)
-        if metar_feats is None:
-            metar_feats = np.zeros(
-                (self.n_stations, self.n_metar_features), dtype=np.float32
-            )
-
-        # Assemble HeteroData
         data = HeteroData()
         data["era5"].x = torch.from_numpy(era5_feats)
         data["metar"].x = torch.from_numpy(metar_feats)
@@ -455,6 +498,11 @@ class CropOSDataset(Dataset):
         data["era5", "to", "metar"].edge_index = self._edge_era5_to_metar
         data["era5", "to", "farm"].edge_index = self._edge_era5_to_farm
         data["metar", "to", "farm"].edge_index = self._edge_metar_to_farm
+        data["metar", "to", "metar"].edge_index = self._edge_metar_to_metar
+
+        data["era5"].pos  = self._era5_pos
+        data["metar"].pos = self._metar_pos
+        data["farm"].pos  = self._farm_pos
 
         return data
 
@@ -471,8 +519,11 @@ def load_dataset_from_parquets(
     era5_node_radius_km: float = 100.0,
     horizons_h: List[int] | None = None,
     threshold_mm: float = 1.0,
+    history_steps: int = 1,
     era5_north_path: str | Path | None = None,
     era5_recent_path: str | Path | None = None,
+    era5_to_metar_k: int = 8,
+    metar_to_metar_k: int = 4,
 ) -> CropOSDataset:
     """Build a CropOSDataset from on-disk or HuggingFace-cached parquet files.
 
@@ -491,6 +542,8 @@ def load_dataset_from_parquets(
         era5_recent_path: Optional path to era5_recent.parquet (recent timestamps top-up).
                           If provided and file exists, concatenated with era5_path.
                           Silently ignored if path does not exist.
+        era5_to_metar_k:  k nearest ERA5 grid points per METAR station.
+        metar_to_metar_k: k nearest METAR peers per station.
 
     Returns:
         Constructed CropOSDataset ready for DataLoader.
@@ -692,6 +745,9 @@ def load_dataset_from_parquets(
         horizons_h=horizons_h,
         era5_node_radius_km=era5_node_radius_km,
         threshold_mm=threshold_mm,
+        history_steps=history_steps,
+        era5_to_metar_k=era5_to_metar_k,
+        metar_to_metar_k=metar_to_metar_k,
     )
 
 
@@ -705,7 +761,10 @@ def load_dataset_from_hf(
     era5_node_radius_km: float = 100.0,
     horizons_h: List[int] | None = None,
     threshold_mm: float = 1.0,
+    history_steps: int = 1,
     cache_dir: str | Path | None = None,
+    era5_to_metar_k: int = 8,
+    metar_to_metar_k: int = 4,
 ) -> CropOSDataset:
     """Build a CropOSDataset by downloading parquets from HuggingFace.
 
@@ -770,6 +829,9 @@ def load_dataset_from_hf(
         era5_node_radius_km=era5_node_radius_km,
         horizons_h=horizons_h,
         threshold_mm=threshold_mm,
+        history_steps=history_steps,
         era5_north_path=era5_north_path,
         era5_recent_path=era5_recent_path,
+        era5_to_metar_k=era5_to_metar_k,
+        metar_to_metar_k=metar_to_metar_k,
     )

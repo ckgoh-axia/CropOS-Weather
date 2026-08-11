@@ -112,6 +112,11 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
     logger.info(f"Device: {device}")
 
     # ── build datasets ────────────────────────────────────────────────────────
+    history_steps = gnn_cfg.get("history_steps", 1)
+    local_mp_steps = gnn_cfg.get("local_mp_steps", 4)
+    era5_to_metar_k = gnn_cfg.get("era5_to_metar_k", 8)
+    metar_to_metar_k = gnn_cfg.get("metar_to_metar_k", 4)
+
     logger.info("Building training dataset...")
     if local_data_dir:
         data_dir = Path(local_data_dir)
@@ -154,8 +159,11 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
             era5_node_radius_km=era5_node_radius_km,
             horizons_h=horizons_h,
             threshold_mm=threshold_mm,
+            history_steps=history_steps,
             era5_north_path=era5_north_path,
             era5_recent_path=era5_recent_path,  # needed for 2023-2024 training data
+            era5_to_metar_k=era5_to_metar_k,
+            metar_to_metar_k=metar_to_metar_k,
         )
         val_ds = load_dataset_from_parquets(
             era5_path=data_dir / "era5_thailand.parquet",
@@ -167,8 +175,11 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
             era5_node_radius_km=era5_node_radius_km,
             horizons_h=horizons_h,
             threshold_mm=threshold_mm,
+            history_steps=history_steps,
             era5_north_path=era5_north_path,
             era5_recent_path=era5_recent_path,
+            era5_to_metar_k=era5_to_metar_k,
+            metar_to_metar_k=metar_to_metar_k,
         )
     else:
         hf_token = os.environ.get("HF_TOKEN")
@@ -190,6 +201,9 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
             era5_node_radius_km=era5_node_radius_km,
             horizons_h=horizons_h,
             threshold_mm=threshold_mm,
+            history_steps=history_steps,
+            era5_to_metar_k=era5_to_metar_k,
+            metar_to_metar_k=metar_to_metar_k,
         )
         val_ds = load_dataset_from_hf(
             repo_id=repo_id,
@@ -201,6 +215,9 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
             era5_node_radius_km=era5_node_radius_km,
             horizons_h=horizons_h,
             threshold_mm=threshold_mm,
+            history_steps=history_steps,
+            era5_to_metar_k=era5_to_metar_k,
+            metar_to_metar_k=metar_to_metar_k,
         )
 
     # Prompt GC between dataset constructions so the large ERA5 DataFrame from
@@ -288,24 +305,24 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
     logger.info("Feature scalers fitted and applied to train + val")
 
     # ── model, optimizer, loss ────────────────────────────────────────────────
-    era5_in   = gnn_cfg.get("era5_in", len(ERA5_FEATURE_NAMES))
-    metar_in  = gnn_cfg.get("metar_in", 9)
+    era5_in   = gnn_cfg.get("era5_in", len(ERA5_FEATURE_NAMES)) * history_steps
+    metar_in  = gnn_cfg.get("metar_in", 9) * history_steps
 
     dual_head: bool = gnn_cfg.get("dual_head", False)
     model = CropOSGNN(
         era5_in=era5_in,
         hidden=gnn_cfg["hidden_channels"],
         n_horizons=len(horizons_h),
-        num_layers=gnn_cfg["num_layers"],
-        dropout=gnn_cfg["dropout"],
+        local_mp_steps=local_mp_steps,
+        dropout=gnn_cfg.get("dropout", 0.1),
         metar_dropout=gnn_cfg.get("metar_dropout", 0.4),
         metar_in=metar_in,
-        dual_head=dual_head,
+        dual_head=gnn_cfg.get("dual_head", False),
     ).to(device)
     logger.info(
-        f"Model: era5_in={era5_in}, metar_in={metar_in}, "
-        f"hidden={gnn_cfg['hidden_channels']}, layers={gnn_cfg['num_layers']}, "
-        f"dual_head={dual_head}"
+        f"Model: era5_in={era5_in} (base×{history_steps}), metar_in={metar_in} "
+        f"(base×{history_steps}), hidden={gnn_cfg['hidden_channels']}, "
+        f"local_mp_steps={local_mp_steps}, dual_head={dual_head}"
     )
 
     optimizer = torch.optim.AdamW(
@@ -350,16 +367,16 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
             _wandb_run = wandb.init(
                 project="cropos-gnn-thai",
                 config={
-                    "era5_in":        era5_in,
-                    "metar_in":       metar_in,
-                    "hidden":         gnn_cfg["hidden_channels"],
-                    "num_layers":     gnn_cfg["num_layers"],
-                    "lr":             tcfg["learning_rate"],
-                    "batch_size":     tcfg["batch_size"],
-                    "era5_radius_km": era5_node_radius_km,
-                    "loss":           "brier_csi",
-                    "pos_weight":     pos_weight,
-                    "device":         str(device),
+                    "era5_in":          era5_in,
+                    "metar_in":         metar_in,
+                    "hidden":           gnn_cfg["hidden_channels"],
+                    "local_mp_steps":   local_mp_steps,
+                    "lr":               tcfg["learning_rate"],
+                    "batch_size":       tcfg["batch_size"],
+                    "era5_radius_km":   era5_node_radius_km,
+                    "loss":             "brier_csi",
+                    "pos_weight":       pos_weight,
+                    "device":           str(device),
                 },
                 # Alert on run completion so you're notified without staying connected
                 settings=wandb.Settings(
@@ -379,16 +396,16 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
 
     with mlflow.start_run():
         mlflow.log_params({
-            "era5_in":        era5_in,
-            "metar_in":       metar_in,
-            "hidden":         gnn_cfg["hidden_channels"],
-            "num_layers":     gnn_cfg["num_layers"],
-            "lr":             tcfg["learning_rate"],
-            "batch_size":     tcfg["batch_size"],
-            "era5_radius_km": era5_node_radius_km,
-            "loss":           "brier_csi",
-            "pos_weight":     pos_weight,
-            "device":         str(device),
+            "era5_in":          era5_in,
+            "metar_in":         metar_in,
+            "hidden":           gnn_cfg["hidden_channels"],
+            "local_mp_steps":   local_mp_steps,
+            "lr":               tcfg["learning_rate"],
+            "batch_size":       tcfg["batch_size"],
+            "era5_radius_km":   era5_node_radius_km,
+            "loss":             "brier_csi",
+            "pos_weight":       pos_weight,
+            "device":           str(device),
         })
 
         best_val_loss = float("inf")

@@ -10,9 +10,19 @@ def _make_graph(n_era5=4, n_metar=2, n_farms=3, metar_in=5):
     data["era5"].x = torch.randn(n_era5, 7)
     data["metar"].x = torch.randn(n_metar, metar_in)
     data["farm"].x = torch.zeros(n_farms, 1)
-    data["era5", "to", "metar"].edge_index = torch.tensor([[0, 1], [0, 1]])
-    data["era5", "to", "farm"].edge_index = torch.tensor([[0, 1, 2], [0, 1, 2]])
-    data["metar", "to", "farm"].edge_index = torch.tensor([[0, 1], [0, 1]])
+
+    # Positions required by RelPos message-passing layers [lat, lon]
+    data["era5"].pos  = torch.tensor([[13.0 + i * 0.5, 100.0 + i * 0.5] for i in range(n_era5)],
+                                     dtype=torch.float)
+    data["metar"].pos = torch.tensor([[13.2 + i * 0.3, 100.2 + i * 0.3] for i in range(n_metar)],
+                                     dtype=torch.float)
+    data["farm"].pos  = torch.tensor([[13.1 + i * 0.4, 100.1 + i * 0.4] for i in range(n_farms)],
+                                     dtype=torch.float)
+
+    data["era5",  "to", "metar"].edge_index = torch.tensor([[0, 1, 2, 3], [0, 0, 1, 1]])
+    data["era5",  "to", "farm"].edge_index  = torch.tensor([[0, 1, 2], [0, 1, 2]])
+    data["metar", "to", "farm"].edge_index  = torch.tensor([[0, 1], [0, 1]])
+    data["metar", "to", "metar"].edge_index = torch.tensor([[0, 1], [1, 0]])
     return data
 
 
@@ -43,12 +53,21 @@ def test_gnn_gradients_flow():
 def test_gnn_works_without_metar_stations():
     """ERA5-only path: empty metar nodes, no edges that use them."""
     data = HeteroData()
-    data["era5"].x = torch.randn(4, 7)
-    data["metar"].x = torch.zeros(0, 5)
-    data["farm"].x = torch.zeros(3, 1)
-    data["era5", "to", "metar"].edge_index = torch.zeros(2, 0, dtype=torch.long)
-    data["era5", "to", "farm"].edge_index = torch.tensor([[0, 1, 2], [0, 1, 2]])
-    data["metar", "to", "farm"].edge_index = torch.zeros(2, 0, dtype=torch.long)
+    data["era5"].x   = torch.randn(4, 7)
+    data["metar"].x  = torch.zeros(0, 5)
+    data["farm"].x   = torch.zeros(3, 1)
+
+    data["era5"].pos  = torch.tensor([[13.0 + i * 0.5, 100.0 + i * 0.5] for i in range(4)],
+                                     dtype=torch.float)
+    data["metar"].pos = torch.zeros(0, 2, dtype=torch.float)
+    data["farm"].pos  = torch.tensor([[13.1 + i * 0.4, 100.1 + i * 0.4] for i in range(3)],
+                                     dtype=torch.float)
+
+    data["era5",  "to", "metar"].edge_index = torch.zeros(2, 0, dtype=torch.long)
+    data["era5",  "to", "farm"].edge_index  = torch.tensor([[0, 1, 2], [0, 1, 2]])
+    data["metar", "to", "farm"].edge_index  = torch.zeros(2, 0, dtype=torch.long)
+    data["metar", "to", "metar"].edge_index = torch.zeros(2, 0, dtype=torch.long)
+
     model = CropOSGNN(era5_in=7, metar_in=5, hidden=32, n_horizons=4)
     model.eval()
     with torch.no_grad():
@@ -63,9 +82,8 @@ def test_dropnode_zeroes_stations_during_training():
     graph = _make_graph()
     original_x = graph["metar"].x.clone()
 
-    # Verify the dropout attribute is set correctly and features are non-zero
     assert model.metar_dropout == 1.0
-    assert original_x.abs().sum() > 0  # non-zero features before dropout
+    assert original_x.abs().sum() > 0
 
 
 def test_dropnode_inactive_at_eval():
@@ -128,3 +146,28 @@ def test_dual_head_gradients_flow():
     loss.backward()
     for name, param in model.named_parameters():
         assert param.grad is not None, f"No gradient for {name}"
+
+
+def test_local_mp_steps_param():
+    """local_mp_steps controls how many metar↔metar iterations are used."""
+    model2 = CropOSGNN(era5_in=7, metar_in=5, hidden=32, n_horizons=4, local_mp_steps=2)
+    model6 = CropOSGNN(era5_in=7, metar_in=5, hidden=32, n_horizons=4, local_mp_steps=6)
+    assert len(model2.metar_convs) == 2
+    assert len(model6.metar_convs) == 6
+
+
+def test_pos_tensors_required():
+    """forward() uses .pos — missing pos should raise AttributeError."""
+    model = CropOSGNN(era5_in=7, metar_in=5, hidden=32, n_horizons=4)
+    data = HeteroData()
+    data["era5"].x  = torch.randn(4, 7)
+    data["metar"].x = torch.randn(2, 5)
+    data["farm"].x  = torch.zeros(3, 1)
+    data["era5",  "to", "metar"].edge_index = torch.tensor([[0, 1], [0, 1]])
+    data["era5",  "to", "farm"].edge_index  = torch.tensor([[0, 1, 2], [0, 1, 2]])
+    data["metar", "to", "farm"].edge_index  = torch.tensor([[0, 1], [0, 1]])
+    data["metar", "to", "metar"].edge_index = torch.tensor([[0, 1], [1, 0]])
+    # No .pos set — expect AttributeError
+    import pytest
+    with pytest.raises((AttributeError, KeyError)):
+        model(data)
