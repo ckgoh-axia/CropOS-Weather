@@ -128,8 +128,8 @@ def per_horizon_report(
     report: dict[int, dict[str, float]] = {}
     for h_idx, h in enumerate(horizons_h):
         p = probs[:, h_idx]
-        l = labels[:, h_idx]
-        conf = binary_confusion_stats(p, l, threshold=threshold)
+        lbl = labels[:, h_idx]
+        conf = binary_confusion_stats(p, lbl, threshold=threshold)
         report[h] = {
             "brier": float(bs[h_idx]),
             "bss": float(bss[h_idx]),

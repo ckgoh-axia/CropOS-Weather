@@ -247,7 +247,8 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
     ).to(device)
     logger.info(
         f"Model: era5_in={era5_in}, metar_in={metar_in}, "
-        f"hidden={gnn_cfg['hidden_channels']}, layers={gnn_cfg['num_layers']}, dual_head={dual_head}"
+        f"hidden={gnn_cfg['hidden_channels']}, layers={gnn_cfg['num_layers']}, "  # noqa: E501
+        f"dual_head={dual_head}"
     )
 
     optimizer = torch.optim.AdamW(
@@ -337,7 +338,11 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
                 labels = batch["farm"].y      # (n_farms_in_batch, n_horizons)
                 if dual_head and isinstance(out, tuple):
                     probs, mm_pred = out
-                    mm_true = batch["farm"].precip_mm if hasattr(batch["farm"], "precip_mm") else torch.zeros_like(probs)
+                    mm_true = (
+                        batch["farm"].precip_mm
+                        if hasattr(batch["farm"], "precip_mm")
+                        else torch.zeros_like(probs)
+                    )
                     loss = criterion(probs, labels, mm_pred, mm_true)
                 else:
                     probs = out
@@ -363,7 +368,11 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
                     labels = batch["farm"].y
                     if dual_head and isinstance(out, tuple):
                         probs, mm_pred = out
-                        mm_true = batch["farm"].precip_mm if hasattr(batch["farm"], "precip_mm") else torch.zeros_like(probs)
+                        mm_true = (
+                        batch["farm"].precip_mm
+                        if hasattr(batch["farm"], "precip_mm")
+                        else torch.zeros_like(probs)
+                    )
                         loss = criterion(probs, labels, mm_pred, mm_true)
                         val_mm_mae_sum += float(torch.mean(torch.abs(mm_pred - mm_true)))
                     else:
@@ -407,7 +416,11 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
                     wandb_metrics["val_mm_mae"] = val_mm_mae
                 _wandb_run.log(wandb_metrics, step=epoch)
             if dual_head:
-                print(f"Epoch {epoch:03d}: train={train_loss:.4f}  val={val_loss:.4f}  val_mm_mae={val_mm_mae:.3f}", flush=True)
+                print(
+                    f"Epoch {epoch:03d}: train={train_loss:.4f}  val={val_loss:.4f}"
+                    f"  val_mm_mae={val_mm_mae:.3f}",
+                    flush=True,
+                )
             else:
                 print(f"Epoch {epoch:03d}: train={train_loss:.4f}  val={val_loss:.4f}", flush=True)
 

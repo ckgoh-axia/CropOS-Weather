@@ -98,7 +98,8 @@ def test_dual_head_loss_backward():
 
 
 def test_dual_head_loss_reg_term_contributes():
-    """DualHeadLoss with reg_weight>0 must differ from BrierCSILoss when mm predictions are wrong."""
+    """DualHeadLoss with reg_weight>0 must differ from BrierCSILoss
+    when mm predictions are wrong."""
     brier = BrierCSILoss(brier_weight=0.5, csi_weight=0.3)
     dual = DualHeadLoss(brier_weight=0.5, csi_weight=0.3, reg_weight=0.2)
     torch.manual_seed(42)
@@ -108,4 +109,6 @@ def test_dual_head_loss_reg_term_contributes():
     mm_true = torch.zeros(4, 3)       # target is no rain
     cls_loss = float(brier(probs, labels))
     combined_loss = float(dual(probs, labels, mm_pred, mm_true))
-    assert combined_loss > cls_loss, "Regression term must increase the loss when mm predictions are wrong"
+    assert combined_loss > cls_loss, (
+        "Regression term must increase the loss when mm predictions are wrong"
+    )

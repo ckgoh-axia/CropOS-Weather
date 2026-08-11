@@ -1,10 +1,10 @@
 # tests/unit/test_metrics.py
 import numpy as np
-import pytest
+
 from src.evaluation.metrics import (
+    binary_confusion_stats,
     brier_score,
     brier_skill_score,
-    binary_confusion_stats,
     per_horizon_report,
     per_station_report,
 )

@@ -89,7 +89,7 @@ def category_confusion_matrix(
     pred_cats = classify_mm_array(pred_mm)
     true_cats = classify_mm_array(true_mm)
     counts: dict[tuple[str, str], int] = {}
-    for p, t in zip(pred_cats.flat, true_cats.flat):
+    for p, t in zip(pred_cats.flat, true_cats.flat, strict=False):
         key = (str(p), str(t))
         counts[key] = counts.get(key, 0) + 1
     return counts

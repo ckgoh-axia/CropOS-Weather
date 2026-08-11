@@ -1,11 +1,10 @@
 # tests/unit/test_agri_classifier.py
 import numpy as np
-import pytest
+
 from src.evaluation.agri_classifier import (
-    AgriClassifier,
     CATEGORIES,
+    AgriClassifier,
     classify_mm_array,
-    operation_safe,
 )
 
 
