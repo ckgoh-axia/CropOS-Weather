@@ -275,15 +275,16 @@ def evaluate(
     loader = DataLoader(ds, batch_size=64, shuffle=False, num_workers=0)
 
     # ── load model ────────────────────────────────────────────────────────────
-    era5_in = gnn_cfg.get("era5_in", len(ERA5_FEATURE_NAMES))
-    metar_in = gnn_cfg.get("metar_in", 9)
+    history_steps = gnn_cfg.get("history_steps", 1)
+    era5_in = gnn_cfg.get("era5_in", len(ERA5_FEATURE_NAMES)) * history_steps
+    metar_in = gnn_cfg.get("metar_in", 9) * history_steps
     dual_head = gnn_cfg.get("dual_head", False)
 
     model = CropOSGNN(
         era5_in=era5_in,
         hidden=gnn_cfg["hidden_channels"],
         n_horizons=len(horizons_h),
-        num_layers=gnn_cfg["num_layers"],
+        local_mp_steps=gnn_cfg.get("local_mp_steps", 4),
         dropout=gnn_cfg["dropout"],
         metar_dropout=0.0,   # no dropout at eval
         metar_in=metar_in,
