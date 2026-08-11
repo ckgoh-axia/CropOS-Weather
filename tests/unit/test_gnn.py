@@ -1,4 +1,5 @@
 # tests/unit/test_gnn.py
+import pytest
 import torch
 from torch_geometric.data import HeteroData
 
@@ -168,6 +169,5 @@ def test_pos_tensors_required():
     data["metar", "to", "farm"].edge_index  = torch.tensor([[0, 1], [0, 1]])
     data["metar", "to", "metar"].edge_index = torch.tensor([[0, 1], [1, 0]])
     # No .pos set — expect AttributeError
-    import pytest
     with pytest.raises((AttributeError, KeyError)):
         model(data)
