@@ -310,7 +310,8 @@ class CropOSDataset(Dataset):
         )
         label_df = label_df.set_index(["timestamp", "station"])
         del era5_df  # free the filtered ERA5 DataFrame — all data now in _era5_by_ts + label_df
-        import gc as _gc_ds; _gc_ds.collect()
+        import gc
+        gc.collect()
 
         # Timestamps where both ERA5 and METAR data are available
         common_ts = sorted(

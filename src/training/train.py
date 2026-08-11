@@ -304,7 +304,8 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
     ).to(device)
     logger.info(
         f"Model: era5_in={era5_in}, metar_in={metar_in}, "
-        f"hidden={gnn_cfg['hidden_channels']}, layers={gnn_cfg['num_layers']}, dual_head={dual_head}"
+        f"hidden={gnn_cfg['hidden_channels']}, layers={gnn_cfg['num_layers']}, "
+        f"dual_head={dual_head}"
     )
 
     optimizer = torch.optim.AdamW(
