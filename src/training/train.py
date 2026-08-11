@@ -262,11 +262,13 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
             brier_weight=loss_cfg.get("brier_weight", 0.5),
             csi_weight=loss_cfg.get("csi_weight", 0.3),
             reg_weight=reg_weight,
+            pos_weight=loss_cfg.get("pos_weight", 1.0),
         )
     else:
         criterion = BrierCSILoss(
             brier_weight=loss_cfg.get("brier_weight", 0.7),
             csi_weight=loss_cfg.get("csi_weight", 0.3),
+            pos_weight=loss_cfg.get("pos_weight", 1.0),
         )
 
     train_loader = DataLoader(

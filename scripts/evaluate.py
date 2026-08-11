@@ -230,6 +230,48 @@ def evaluate(
         sys.exit(1)
 
     print(f"Loaded {len(ds):,} evaluation timestamps")
+
+    # ── apply feature scalers (must match train.py scaling) ──────────────────
+    # train.py fits scalers on training data and saves them beside the checkpoint.
+    # Without this block evaluate.py feeds raw unscaled features to a model that
+    # expects scaled inputs — resulting in garbage outputs (AUC ≈ 0.500).
+    from src.features.engineer import FeatureScaler as _FeatureScaler
+    import numpy as _np
+    _ckpt_dir = Path(checkpoint_path).parent
+    _era5_scaler_path  = _ckpt_dir / "era5_scaler.npz"
+    _metar_scaler_path = _ckpt_dir / "metar_scaler.npz"
+
+    if _era5_scaler_path.exists():
+        _era5_scaler = _FeatureScaler.load(str(_era5_scaler_path))
+        _era5_mean = _np.array(
+            [_era5_scaler._means[c] for c in ds.era5_feature_cols], dtype=_np.float32
+        )
+        _era5_std = _np.maximum(
+            _np.array([_era5_scaler._stds[c] for c in ds.era5_feature_cols], dtype=_np.float32),
+            1e-8,
+        )
+        for _ts in ds._era5_by_ts:
+            ds._era5_by_ts[_ts] = (ds._era5_by_ts[_ts] - _era5_mean) / _era5_std
+        print(f"[EVAL] ERA5 features scaled  ({_era5_scaler_path})", flush=True)
+    else:
+        print(f"[EVAL] WARNING: ERA5 scaler not found at {_era5_scaler_path} — raw features!", flush=True)
+
+    if _metar_scaler_path.exists():
+        _metar_scaler = _FeatureScaler.load(str(_metar_scaler_path))
+        _metar_mean = _np.array(
+            [_metar_scaler._means[c] for c in ds.metar_feature_cols], dtype=_np.float32
+        )
+        _metar_std = _np.maximum(
+            _np.array([_metar_scaler._stds[c] for c in ds.metar_feature_cols], dtype=_np.float32),
+            1e-8,
+        )
+        for _ts in ds._metar_by_ts:
+            ds._metar_by_ts[_ts] = (ds._metar_by_ts[_ts] - _metar_mean) / _metar_std
+        print(f"[EVAL] METAR features scaled ({_metar_scaler_path})", flush=True)
+    else:
+        print(f"[EVAL] WARNING: METAR scaler not found at {_metar_scaler_path} — raw features!", flush=True)
+    # ─────────────────────────────────────────────────────────────────────────
+
     loader = DataLoader(ds, batch_size=64, shuffle=False, num_workers=0)
 
     # ── load model ────────────────────────────────────────────────────────────
