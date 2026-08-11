@@ -1,0 +1,27 @@
+# Evaluation configuration for CropOSGNN
+thresholds:
+  rain_probability: 0.5       # binary decision threshold (tune on val set)
+  drizzle_ok_mm: 2.0          # mm below which pesticide spray is safe
+
+# Agricultural thresholds (matches agri_classifier.py CATEGORIES — edit both together)
+agri_mm_thresholds:
+  drizzle_hi: 2.0
+  light_rain_hi: 10.0
+  moderate_rain_hi: 25.0
+  heavy_rain_hi: 50.0
+
+# Operations to report decisions for
+operations_to_evaluate:
+  - pesticide_spray
+  - fertilizer_basal
+  - fertilizer_foliar
+  - field_traffic
+  - harvest
+
+# NWP benchmark Brier Skill Score (ECMWF ENS for SE Asia, 24h ahead)
+# Source: ECMWF verification report 2023, tropical land stations
+nwp_bss_benchmark:
+  12: 0.32
+  24: 0.28
+  36: 0.22
+  48: 0.18
