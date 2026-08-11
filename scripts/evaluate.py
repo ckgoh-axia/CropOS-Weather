@@ -189,6 +189,11 @@ def evaluate(
     print(f"Checkpoint: {checkpoint_path}")
 
     # ── load dataset ─────────────────────────────────────────────────────────
+    # These must match what was used during training — read from model.yaml.
+    history_steps = gnn_cfg.get("history_steps", 1)
+    era5_to_metar_k = gnn_cfg.get("era5_to_metar_k", 8)
+    metar_to_metar_k = gnn_cfg.get("metar_to_metar_k", 4)
+
     print("\nLoading dataset...")
     if local_data_dir:
         data_dir = Path(local_data_dir)
@@ -202,6 +207,9 @@ def evaluate(
             era5_node_radius_km=era5_radius_km,
             horizons_h=horizons_h,
             threshold_mm=threshold_mm,
+            history_steps=history_steps,
+            era5_to_metar_k=era5_to_metar_k,
+            metar_to_metar_k=metar_to_metar_k,
             era5_north_path=data_dir / "era5_north.parquet" if (data_dir / "era5_north.parquet").exists() else None,
             era5_recent_path=data_dir / "era5_recent.parquet" if (data_dir / "era5_recent.parquet").exists() else None,
         )
@@ -223,6 +231,9 @@ def evaluate(
             era5_node_radius_km=era5_radius_km,
             horizons_h=horizons_h,
             threshold_mm=threshold_mm,
+            history_steps=history_steps,
+            era5_to_metar_k=era5_to_metar_k,
+            metar_to_metar_k=metar_to_metar_k,
         )
 
     if len(ds) == 0:
