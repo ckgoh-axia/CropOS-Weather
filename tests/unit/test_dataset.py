@@ -241,6 +241,27 @@ def test_dataset_zero_threshold_mostly_rain():
     assert rain_count > total * 0.5, "Expected mostly rain with threshold=0"
 
 
+def test_dataset_stores_continuous_mm_labels():
+    """data['farm'].precip_mm must be a float tensor of the same shape as .y."""
+    ds = _make_dataset()
+    sample = ds[0]
+    assert hasattr(sample["farm"], "precip_mm"), "precip_mm attribute missing on farm node"
+    assert sample["farm"].precip_mm.shape == sample["farm"].y.shape
+    assert sample["farm"].precip_mm.dtype == torch.float32
+    assert (sample["farm"].precip_mm >= 0).all(), "Negative mm values found"
+
+
+def test_dataset_precip_mm_is_continuous():
+    """precip_mm must not be binary — should have non-integer values with threshold_mm=1."""
+    ds = _make_dataset(threshold_mm=1.0)
+    # Collect all mm values; synthetic data has uniform(0,5) precipitation so values
+    # should not all be 0 or 1.
+    all_mm = torch.cat([ds[i]["farm"].precip_mm.flatten() for i in range(min(5, len(ds)))])
+    # Check that there are values strictly between 0 and 1 (non-binary)
+    between = ((all_mm > 0) & (all_mm < 1)).sum()
+    assert between > 0, "precip_mm looks binary — expected continuous float values"
+
+
 def test_dataset_rain_event_cast_to_float():
     """rain_event (bool in METAR) must be stored as float, not bool, in tensors."""
     ds = _make_dataset()

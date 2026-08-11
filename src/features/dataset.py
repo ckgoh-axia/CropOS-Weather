@@ -363,6 +363,22 @@ class CropOSDataset(Dataset):
                     except KeyError:
                         pass  # remains 0; caller may apply mask if needed
         self._label_arr = label_arr
+
+        # Continuous precipitation mm array for regression head and evaluation.
+        print("[DS] Pre-computing continuous mm label array...", flush=True)
+        mm_arr = np.zeros((n_ts, self.n_stations, self.n_horizons), dtype=np.float32)
+        for h_idx, h in enumerate(horizons_h):
+            h_delta = pd.Timedelta(hours=h)
+            for ts_idx, ts in enumerate(valid_ts):
+                future_ts = ts + h_delta
+                for s_idx, station in enumerate(station_order):
+                    try:
+                        precip = label_df.loc[(future_ts, station), "precip_mm"]
+                        mm_arr[ts_idx, s_idx, h_idx] = max(0.0, float(precip))
+                    except KeyError:
+                        pass  # remains 0 — missing label treated as no rain
+        self._mm_arr = mm_arr
+
         if label_arr.size == 0:
             logger.warning(
                 "EMPTY DATASET: no valid timestamps found for this split. "
@@ -431,6 +447,7 @@ class CropOSDataset(Dataset):
         data["metar"].x = torch.from_numpy(metar_feats)
         data["farm"].x = torch.zeros(self.n_stations, 1, dtype=torch.float)
         data["farm"].y = torch.from_numpy(self._label_arr[idx])
+        data["farm"].precip_mm = torch.from_numpy(self._mm_arr[idx])
 
         data["era5", "to", "metar"].edge_index = self._edge_era5_to_metar
         data["era5", "to", "farm"].edge_index = self._edge_era5_to_farm
