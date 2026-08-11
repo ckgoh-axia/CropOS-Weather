@@ -309,6 +309,8 @@ class CropOSDataset(Dataset):
             era5_df, station_coords, station_order
         )
         label_df = label_df.set_index(["timestamp", "station"])
+        del era5_df  # free the filtered ERA5 DataFrame — all data now in _era5_by_ts + label_df
+        import gc as _gc_ds; _gc_ds.collect()
 
         # Timestamps where both ERA5 and METAR data are available
         common_ts = sorted(
@@ -508,10 +510,19 @@ def load_dataset_from_parquets(
         f"[DATA] Loading ERA5 from {era5_path} (filter: {start_date} – {end_date})...",
         flush=True,
     )
+    # Load only the columns that CropOSDataset actually needs.
+    # This cuts peak RAM from ~12 GB → ~3 GB for a multi-year ERA5 parquet
+    # by avoiding materialising NWP/extended columns in memory.
+    from src.features.engineer import ERA5_SURFACE_VARS as _ERA5_SURFACE_VARS
+    _era5_cols = ["timestamp", "lat", "lon"] + list(_ERA5_SURFACE_VARS)
     try:
-        era5_df = pd.read_parquet(era5_path, filters=_pq_date_filters(start_date, end_date))
+        era5_df = pd.read_parquet(
+            era5_path,
+            columns=_era5_cols,
+            filters=_pq_date_filters(start_date, end_date),
+        )
     except Exception:
-        era5_df = pd.read_parquet(era5_path)
+        era5_df = pd.read_parquet(era5_path, columns=_era5_cols)
     era5_df["timestamp"] = pd.to_datetime(era5_df["timestamp"], utc=True)
     if start_date:
         era5_df = era5_df[era5_df["timestamp"] >= pd.Timestamp(start_date, tz="UTC")]
@@ -530,10 +541,12 @@ def load_dataset_from_parquets(
         print(f"[DATA] Loading ERA5 north top-up from {era5_north_path}...", flush=True)
         try:
             north_df = pd.read_parquet(
-                era5_north_path, filters=_pq_date_filters(start_date, end_date)
+                era5_north_path,
+                columns=_era5_cols,
+                filters=_pq_date_filters(start_date, end_date),
             )
         except Exception:
-            north_df = pd.read_parquet(era5_north_path)
+            north_df = pd.read_parquet(era5_north_path, columns=_era5_cols)
         north_df["timestamp"] = pd.to_datetime(north_df["timestamp"], utc=True)
         if start_date:
             north_df = north_df[north_df["timestamp"] >= pd.Timestamp(start_date, tz="UTC")]
@@ -557,10 +570,12 @@ def load_dataset_from_parquets(
         print(f"[DATA] Loading ERA5 recent from {era5_recent_path}...", flush=True)
         try:
             recent_era5_df = pd.read_parquet(
-                era5_recent_path, filters=_pq_date_filters(start_date, end_date)
+                era5_recent_path,
+                columns=_era5_cols,
+                filters=_pq_date_filters(start_date, end_date),
             )
         except Exception:
-            recent_era5_df = pd.read_parquet(era5_recent_path)
+            recent_era5_df = pd.read_parquet(era5_recent_path, columns=_era5_cols)
         recent_era5_df["timestamp"] = pd.to_datetime(recent_era5_df["timestamp"], utc=True)
         # Show full range before filtering so we can see if the file even has recent data
         _rec_min_raw = recent_era5_df["timestamp"].min() if len(recent_era5_df) > 0 else "EMPTY"

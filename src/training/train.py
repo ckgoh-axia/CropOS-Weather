@@ -10,6 +10,9 @@ Environment variables
 ---------------------
     HF_TOKEN            — HuggingFace read token (required unless --local)
     HF_DATASET_REPO     — Override auto-detected repo id
+    HF_MODEL_REPO       — HuggingFace model repo to upload checkpoint to
+                          (e.g. gjmck78/cropos-gnn). Created if it doesn't exist.
+                          Skipped if unset or HF_TOKEN not present.
     WANDB_API_KEY       — Weights & Biases key (optional; skipped if absent)
     MLFLOW_TRACKING_URI — MLflow backend (default: local mlruns/)
 """
@@ -35,6 +38,60 @@ from src.training.loss import BrierCSILoss, DualHeadLoss
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
+
+
+def _upload_checkpoint_to_hf(
+    checkpoint_dir: str,
+    hf_token: str | None,
+    model_repo: str | None,
+) -> None:
+    """Upload best_model.pt and scalers to HuggingFace model repo.
+
+    Non-fatal — logs warnings and returns on any error so training completion
+    is never blocked by a failed upload.
+    """
+    if not hf_token:
+        print("HF_TOKEN not set — skipping HuggingFace checkpoint upload", flush=True)
+        return
+    if not model_repo:
+        print("HF_MODEL_REPO not set — skipping HuggingFace checkpoint upload", flush=True)
+        return
+
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi(token=hf_token)
+
+        # Create repo if it doesn't exist
+        try:
+            api.create_repo(repo_id=model_repo, repo_type="model", exist_ok=True)
+        except Exception as e:
+            print(f"  HF repo create warning (non-fatal): {e}", flush=True)
+
+        # Upload checkpoint files
+        files_to_upload = [
+            "best_model.pt",
+            "era5_scaler.npz",
+            "metar_scaler.npz",
+        ]
+        for fname in files_to_upload:
+            fpath = Path(checkpoint_dir) / fname
+            if fpath.exists():
+                api.upload_file(
+                    path_or_fileobj=str(fpath),
+                    path_in_repo=fname,
+                    repo_id=model_repo,
+                    repo_type="model",
+                )
+                print(f"  ✓ Uploaded {fname} → hf://{model_repo}/{fname}", flush=True)
+            else:
+                print(f"  WARNING: {fpath} not found, skipping upload", flush=True)
+
+        print(
+            f"Checkpoint uploaded to https://huggingface.co/{model_repo}",
+            flush=True,
+        )
+    except Exception as exc:
+        print(f"WARNING: HuggingFace upload failed (non-fatal): {exc}", flush=True)
 
 
 def train(config_dir: str = "configs", local_data_dir: str | None = None) -> None:
@@ -247,8 +304,7 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
     ).to(device)
     logger.info(
         f"Model: era5_in={era5_in}, metar_in={metar_in}, "
-        f"hidden={gnn_cfg['hidden_channels']}, layers={gnn_cfg['num_layers']}, "  # noqa: E501
-        f"dual_head={dual_head}"
+        f"hidden={gnn_cfg['hidden_channels']}, layers={gnn_cfg['num_layers']}, dual_head={dual_head}"
     )
 
     optimizer = torch.optim.AdamW(
@@ -257,20 +313,25 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
         weight_decay=tcfg["weight_decay"],
     )
     loss_cfg = tcfg.get("loss", {})
+    pos_weight: float = loss_cfg.get("pos_weight", 1.0)
     reg_weight = loss_cfg.get("reg_weight", 0.0) if dual_head else 0.0
     if dual_head and reg_weight > 0:
         criterion = DualHeadLoss(
             brier_weight=loss_cfg.get("brier_weight", 0.5),
             csi_weight=loss_cfg.get("csi_weight", 0.3),
             reg_weight=reg_weight,
-            pos_weight=loss_cfg.get("pos_weight", 1.0),
+            pos_weight=pos_weight,
         )
     else:
         criterion = BrierCSILoss(
             brier_weight=loss_cfg.get("brier_weight", 0.7),
             csi_weight=loss_cfg.get("csi_weight", 0.3),
-            pos_weight=loss_cfg.get("pos_weight", 1.0),
+            pos_weight=pos_weight,
         )
+    logger.info(
+        f"Loss: brier_weight={loss_cfg.get('brier_weight', 0.7)}, "
+        f"csi_weight={loss_cfg.get('csi_weight', 0.3)}, pos_weight={pos_weight}"
+    )
 
     train_loader = DataLoader(
         train_ds, batch_size=tcfg["batch_size"], shuffle=True, num_workers=0
@@ -296,8 +357,13 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
                     "batch_size":     tcfg["batch_size"],
                     "era5_radius_km": era5_node_radius_km,
                     "loss":           "brier_csi",
+                    "pos_weight":     pos_weight,
                     "device":         str(device),
                 },
+                # Alert on run completion so you're notified without staying connected
+                settings=wandb.Settings(
+                    _save_requirements=False,
+                ),
             )
             print(f"W&B run: {_wandb_run.url}", flush=True)
         except Exception as _wb_exc:
@@ -320,6 +386,7 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
             "batch_size":     tcfg["batch_size"],
             "era5_radius_km": era5_node_radius_km,
             "loss":           "brier_csi",
+            "pos_weight":     pos_weight,
             "device":         str(device),
         })
 
@@ -369,10 +436,10 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
                     if dual_head and isinstance(out, tuple):
                         probs, mm_pred = out
                         mm_true = (
-                        batch["farm"].precip_mm
-                        if hasattr(batch["farm"], "precip_mm")
-                        else torch.zeros_like(probs)
-                    )
+                            batch["farm"].precip_mm
+                            if hasattr(batch["farm"], "precip_mm")
+                            else torch.zeros_like(probs)
+                        )
                         loss = criterion(probs, labels, mm_pred, mm_true)
                         val_mm_mae_sum += float(torch.mean(torch.abs(mm_pred - mm_true)))
                     else:
@@ -417,8 +484,8 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
                 _wandb_run.log(wandb_metrics, step=epoch)
             if dual_head:
                 print(
-                    f"Epoch {epoch:03d}: train={train_loss:.4f}  val={val_loss:.4f}"
-                    f"  val_mm_mae={val_mm_mae:.3f}",
+                    f"Epoch {epoch:03d}: train={train_loss:.4f}  "
+                    f"val={val_loss:.4f}  val_mm_mae={val_mm_mae:.3f}",
                     flush=True,
                 )
             else:
@@ -455,6 +522,19 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
         "Scalers saved to checkpoints/era5_scaler.npz  checkpoints/metar_scaler.npz",
         flush=True,
     )
+
+    # ── upload checkpoint to HuggingFace ─────────────────────────────────────
+    hf_token = os.environ.get("HF_TOKEN")
+    model_repo = os.environ.get("HF_MODEL_REPO")
+    if not model_repo and hf_token:
+        # Auto-detect from HF_USER or whoami
+        try:
+            from huggingface_hub import HfApi
+            username = os.environ.get("HF_USER") or HfApi().whoami(token=hf_token)["name"]
+            model_repo = f"{username}/cropos-gnn"
+        except Exception:
+            pass
+    _upload_checkpoint_to_hf("checkpoints", hf_token, model_repo)
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────

@@ -7,5 +7,5 @@ gradient_clip: 1.0
 loss:
   brier_weight: 0.7
   csi_weight: 0.3
-  pos_weight: 16.5   # (n_dry/n_rain) ≈ 17:1 at 5.7% rain rate
-  reg_weight: 0.2             # weight for mm Huber loss when dual_head=true (0 = disable regression)
+  pos_weight: 16.5   # n_dry/n_rain ≈ 17:1 at 5.7% rain rate (ERA5 ≥1mm/hr)
+  reg_weight: 0.2    # only active when dual_head: true
