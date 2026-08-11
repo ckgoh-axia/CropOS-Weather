@@ -7,3 +7,4 @@ gradient_clip: 1.0
 loss:
   brier_weight: 0.7
   csi_weight: 0.3
+  reg_weight: 0.2             # weight for mm Huber loss when dual_head=true (0 = disable regression)

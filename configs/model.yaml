@@ -13,3 +13,4 @@ gnn:
   dropout: 0.1
   metar_dropout: 0.4
   edge_radius_km: 100       # ERA5 node filtering radius for dataset construction
+  dual_head: false             # set true to enable mm regression head (adds ~10% params)

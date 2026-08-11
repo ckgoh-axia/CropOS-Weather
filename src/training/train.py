@@ -31,7 +31,7 @@ from src.features.dataset import load_dataset_from_hf, load_dataset_from_parquet
 from src.features.engineer import ERA5_FEATURE_NAMES, FeatureScaler
 from src.ingestion.metar import STATION_COORDS, THAI_METAR_STATIONS
 from src.models.gnn import CropOSGNN
-from src.training.loss import BrierCSILoss
+from src.training.loss import BrierCSILoss, DualHeadLoss
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -234,6 +234,7 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
     era5_in   = gnn_cfg.get("era5_in", len(ERA5_FEATURE_NAMES))
     metar_in  = gnn_cfg.get("metar_in", 9)
 
+    dual_head: bool = gnn_cfg.get("dual_head", False)
     model = CropOSGNN(
         era5_in=era5_in,
         hidden=gnn_cfg["hidden_channels"],
@@ -242,10 +243,11 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
         dropout=gnn_cfg["dropout"],
         metar_dropout=gnn_cfg.get("metar_dropout", 0.4),
         metar_in=metar_in,
+        dual_head=dual_head,
     ).to(device)
     logger.info(
         f"Model: era5_in={era5_in}, metar_in={metar_in}, "
-        f"hidden={gnn_cfg['hidden_channels']}, layers={gnn_cfg['num_layers']}"
+        f"hidden={gnn_cfg['hidden_channels']}, layers={gnn_cfg['num_layers']}, dual_head={dual_head}"
     )
 
     optimizer = torch.optim.AdamW(
@@ -253,10 +255,19 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
         lr=tcfg["learning_rate"],
         weight_decay=tcfg["weight_decay"],
     )
-    criterion = BrierCSILoss(
-        brier_weight=tcfg["loss"]["brier_weight"],
-        csi_weight=tcfg["loss"]["csi_weight"],
-    )
+    loss_cfg = tcfg.get("loss", {})
+    reg_weight = loss_cfg.get("reg_weight", 0.0) if dual_head else 0.0
+    if dual_head and reg_weight > 0:
+        criterion = DualHeadLoss(
+            brier_weight=loss_cfg.get("brier_weight", 0.5),
+            csi_weight=loss_cfg.get("csi_weight", 0.3),
+            reg_weight=reg_weight,
+        )
+    else:
+        criterion = BrierCSILoss(
+            brier_weight=loss_cfg.get("brier_weight", 0.7),
+            csi_weight=loss_cfg.get("csi_weight", 0.3),
+        )
 
     train_loader = DataLoader(
         train_ds, batch_size=tcfg["batch_size"], shuffle=True, num_workers=0
@@ -320,9 +331,15 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
             for batch in train_loader:
                 batch = batch.to(device)
                 optimizer.zero_grad()
-                preds = model(batch)          # (n_farms_in_batch, n_horizons)
-                labels = batch["farm"].y      # same shape
-                loss = criterion(preds, labels)
+                out = model(batch)
+                labels = batch["farm"].y      # (n_farms_in_batch, n_horizons)
+                if dual_head and isinstance(out, tuple):
+                    probs, mm_pred = out
+                    mm_true = batch["farm"].precip_mm if hasattr(batch["farm"], "precip_mm") else torch.zeros_like(probs)
+                    loss = criterion(probs, labels, mm_pred, mm_true)
+                else:
+                    probs = out
+                    loss = criterion(probs, labels)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
                 optimizer.step()
@@ -334,19 +351,31 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
             # ── validate ──────────────────────────────────────────────────
             model.eval()
             val_loss_sum = 0.0
+            val_mm_mae_sum = 0.0
             val_batches = 0
             _val_preds_all: list[np.ndarray] = []
             with torch.no_grad():
                 for batch in val_loader:
                     batch = batch.to(device)
-                    preds = model(batch)
+                    out = model(batch)
                     labels = batch["farm"].y
-                    loss = criterion(preds, labels)
+                    if dual_head and isinstance(out, tuple):
+                        probs, mm_pred = out
+                        mm_true = batch["farm"].precip_mm if hasattr(batch["farm"], "precip_mm") else torch.zeros_like(probs)
+                        loss = criterion(probs, labels, mm_pred, mm_true)
+                        val_mm_mae_sum += float(torch.mean(torch.abs(mm_pred - mm_true)))
+                    else:
+                        probs = out
+                        loss = criterion(probs, labels)
                     val_loss_sum += float(loss)
                     val_batches += 1
-                    _val_preds_all.append(preds.cpu().float().numpy())
+                    _val_preds_all.append(probs.cpu().float().numpy())
 
             val_loss = val_loss_sum / max(val_batches, 1)
+            if dual_head:
+                val_mm_mae = val_mm_mae_sum / max(val_batches, 1)
+            else:
+                val_mm_mae = 0.0
 
             # Log val prediction distribution every epoch to detect mode collapse
             # (std ≈ 0 means model predicts a constant regardless of input → flat val_loss)
@@ -366,19 +395,19 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
                         flush=True,
                     )
 
-            mlflow.log_metrics(
-                {"train_loss": train_loss, "val_loss": val_loss}, step=epoch
-            )
+            metrics_to_log = {"train_loss": train_loss, "val_loss": val_loss}
+            if dual_head:
+                metrics_to_log["val_mm_mae"] = val_mm_mae
+            mlflow.log_metrics(metrics_to_log, step=epoch)
             if _wandb_run is not None:
-                _wandb_run.log(
-                    {"train_loss": train_loss, "val_loss": val_loss,
-                     "epoch": epoch},
-                    step=epoch,
-                )
-            print(
-                f"Epoch {epoch:03d}: train={train_loss:.4f}  val={val_loss:.4f}",
-                flush=True,
-            )
+                wandb_metrics = {"train_loss": train_loss, "val_loss": val_loss, "epoch": epoch}
+                if dual_head:
+                    wandb_metrics["val_mm_mae"] = val_mm_mae
+                _wandb_run.log(wandb_metrics, step=epoch)
+            if dual_head:
+                print(f"Epoch {epoch:03d}: train={train_loss:.4f}  val={val_loss:.4f}  val_mm_mae={val_mm_mae:.3f}", flush=True)
+            else:
+                print(f"Epoch {epoch:03d}: train={train_loss:.4f}  val={val_loss:.4f}", flush=True)
 
             # ── early stopping + checkpoint ───────────────────────────────
             if val_loss < best_val_loss:
