@@ -94,7 +94,22 @@ def _upload_checkpoint_to_hf(
         print(f"WARNING: HuggingFace upload failed (non-fatal): {exc}", flush=True)
 
 
-def train(config_dir: str = "configs", local_data_dir: str | None = None) -> None:
+def train(
+    config_dir: str = "configs",
+    local_data_dir: str | None = None,
+    overrides: dict | None = None,
+) -> None:
+    """Train CropOSGNN.
+
+    Parameters
+    ----------
+    overrides:
+        Dict of hyperparameter overrides applied after loading config files.
+        Recognised keys: history_steps, local_mp_steps, hidden_channels,
+        era5_to_metar_k, metar_to_metar_k, dropout, metar_dropout,
+        learning_rate, pos_weight, brier_weight, csi_weight.
+        Used by the W&B sweep runner (scripts/run_sweep.py).
+    """
     # ── load configs ──────────────────────────────────────────────────────────
     with open(f"{config_dir}/model.yaml") as f:
         mcfg = yaml.safe_load(f)
@@ -104,6 +119,23 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
         dcfg = yaml.safe_load(f)
 
     gnn_cfg = mcfg["gnn"]
+
+    # ── apply sweep / CLI overrides ───────────────────────────────────────────
+    _GNN_KEYS = {
+        "history_steps", "local_mp_steps", "hidden_channels",
+        "era5_to_metar_k", "metar_to_metar_k", "dropout", "metar_dropout",
+    }
+    if overrides:
+        for k, v in overrides.items():
+            if k in _GNN_KEYS:
+                gnn_cfg[k] = v
+                logger.info(f"Override gnn.{k} = {v}")
+            elif k == "learning_rate":
+                tcfg["learning_rate"] = v
+                logger.info(f"Override learning_rate = {v}")
+            elif k in ("pos_weight", "brier_weight", "csi_weight"):
+                tcfg.setdefault("loss", {})[k] = v
+                logger.info(f"Override loss.{k} = {v}")
     horizons_h: list[int] = dcfg["forecast_horizons"]
     threshold_mm: float = dcfg["precipitation_label_threshold_mm"]
     era5_node_radius_km: float = gnn_cfg.get("edge_radius_km", 100.0)
@@ -364,26 +396,32 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
     if os.environ.get("WANDB_API_KEY"):
         try:
             import wandb
-            _wandb_run = wandb.init(
-                project="cropos-gnn-thai",
-                config={
-                    "era5_in":          era5_in,
-                    "metar_in":         metar_in,
-                    "hidden":           gnn_cfg["hidden_channels"],
-                    "local_mp_steps":   local_mp_steps,
-                    "lr":               tcfg["learning_rate"],
-                    "batch_size":       tcfg["batch_size"],
-                    "era5_radius_km":   era5_node_radius_km,
-                    "loss":             "brier_csi",
-                    "pos_weight":       pos_weight,
-                    "device":           str(device),
-                },
-                # Alert on run completion so you're notified without staying connected
-                settings=wandb.Settings(
-                    _save_requirements=False,
-                ),
-            )
-            print(f"W&B run: {_wandb_run.url}", flush=True)
+            # When running under a sweep agent, wandb.run is already initialised
+            # by the sweep framework before train() is called.  Calling init()
+            # again would create a nested / duplicate run, so we reuse it.
+            if wandb.run is not None:
+                _wandb_run = wandb.run
+                print(f"W&B sweep run active: {_wandb_run.url}", flush=True)
+            else:
+                _wandb_run = wandb.init(
+                    project="cropos-gnn-thai",
+                    config={
+                        "era5_in":          era5_in,
+                        "metar_in":         metar_in,
+                        "hidden":           gnn_cfg["hidden_channels"],
+                        "local_mp_steps":   local_mp_steps,
+                        "lr":               tcfg["learning_rate"],
+                        "batch_size":       tcfg["batch_size"],
+                        "era5_radius_km":   era5_node_radius_km,
+                        "loss":             "brier_csi",
+                        "pos_weight":       pos_weight,
+                        "device":           str(device),
+                    },
+                    settings=wandb.Settings(
+                        _save_requirements=False,
+                    ),
+                )
+                print(f"W&B run: {_wandb_run.url}", flush=True)
         except Exception as _wb_exc:
             print(f"W&B init failed (non-fatal): {_wb_exc}", flush=True)
             _wandb_run = None
@@ -407,6 +445,24 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
             "pos_weight":       pos_weight,
             "device":           str(device),
         })
+
+        # ── climatological base rate (training labels) ───────────────────────
+        # Needed for BSS = 1 - BS / BS_clim.
+        # BS_clim = mean((clim_rate - y)^2) where clim_rate = mean(y) over training set.
+        # Computed once here; used every validation epoch.
+        logger.info("Computing climatological base rate from training labels...")
+        _clim_labels: list[np.ndarray] = []
+        _clim_loader = DataLoader(train_ds, batch_size=tcfg["batch_size"], shuffle=False, num_workers=0)
+        with torch.no_grad():
+            for _b in _clim_loader:
+                _clim_labels.append(_b["farm"].y.cpu().float().numpy())
+        _clim_labels_cat = np.concatenate(_clim_labels, axis=0)   # (N_samples * n_farms, n_horizons)
+        clim_rate = _clim_labels_cat.mean(axis=0)                  # (n_horizons,) mean rain freq per horizon
+        bs_clim = float(np.mean((clim_rate - _clim_labels_cat) ** 2))
+        logger.info(
+            f"Clim base rate per horizon: {np.round(clim_rate, 3)}  |  BS_clim={bs_clim:.4f}"
+        )
+        del _clim_labels, _clim_labels_cat, _clim_loader
 
         best_val_loss = float("inf")
         patience_counter = 0
@@ -446,6 +502,7 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
             val_mm_mae_sum = 0.0
             val_batches = 0
             _val_preds_all: list[np.ndarray] = []
+            _val_labels_all: list[np.ndarray] = []
             with torch.no_grad():
                 for batch in val_loader:
                     batch = batch.to(device)
@@ -466,12 +523,16 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
                     val_loss_sum += float(loss)
                     val_batches += 1
                     _val_preds_all.append(probs.cpu().float().numpy())
+                    _val_labels_all.append(labels.cpu().float().numpy())
 
             val_loss = val_loss_sum / max(val_batches, 1)
-            if dual_head:
-                val_mm_mae = val_mm_mae_sum / max(val_batches, 1)
-            else:
-                val_mm_mae = 0.0
+            val_mm_mae = val_mm_mae_sum / max(val_batches, 1) if dual_head else 0.0
+
+            # ── BSS = 1 - BS_model / BS_clim  (positive = beats climatology) ─
+            _preds_np  = np.concatenate(_val_preds_all,  axis=0)
+            _labels_np = np.concatenate(_val_labels_all, axis=0)
+            bs_model = float(np.mean((_preds_np - _labels_np) ** 2))
+            bss = 1.0 - bs_model / (bs_clim + 1e-9)
 
             # Log val prediction distribution every epoch to detect mode collapse
             # (std ≈ 0 means model predicts a constant regardless of input → flat val_loss)
@@ -491,23 +552,29 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
                         flush=True,
                     )
 
-            metrics_to_log = {"train_loss": train_loss, "val_loss": val_loss}
+            metrics_to_log = {"train_loss": train_loss, "val_loss": val_loss, "bss": bss}
             if dual_head:
                 metrics_to_log["val_mm_mae"] = val_mm_mae
             mlflow.log_metrics(metrics_to_log, step=epoch)
             if _wandb_run is not None:
-                wandb_metrics = {"train_loss": train_loss, "val_loss": val_loss, "epoch": epoch}
+                wandb_metrics = {
+                    "train_loss": train_loss, "val_loss": val_loss,
+                    "bss": bss, "epoch": epoch,
+                }
                 if dual_head:
                     wandb_metrics["val_mm_mae"] = val_mm_mae
                 _wandb_run.log(wandb_metrics, step=epoch)
             if dual_head:
                 print(
                     f"Epoch {epoch:03d}: train={train_loss:.4f}  "
-                    f"val={val_loss:.4f}  val_mm_mae={val_mm_mae:.3f}",
+                    f"val={val_loss:.4f}  bss={bss:+.4f}  val_mm_mae={val_mm_mae:.3f}",
                     flush=True,
                 )
             else:
-                print(f"Epoch {epoch:03d}: train={train_loss:.4f}  val={val_loss:.4f}", flush=True)
+                print(
+                    f"Epoch {epoch:03d}: train={train_loss:.4f}  val={val_loss:.4f}  bss={bss:+.4f}",
+                    flush=True,
+                )
 
             # ── early stopping + checkpoint ───────────────────────────────
             if val_loss < best_val_loss:
@@ -531,7 +598,7 @@ def train(config_dir: str = "configs", local_data_dir: str | None = None) -> Non
                     )
                     break
 
-    print(f"Training complete. Best val loss: {best_val_loss:.4f}", flush=True)
+    print(f"Training complete. Best val loss: {best_val_loss:.4f}  BSS_clim={bs_clim:.4f}", flush=True)
     if _wandb_run is not None:
         _wandb_run.summary["best_val_loss"] = best_val_loss
         _wandb_run.finish()

@@ -1,11 +1,14 @@
 batch_size: 32
 learning_rate: 1.0e-4
 weight_decay: 1.0e-5
-epochs: 100
-early_stopping_patience: 10
+epochs: 200
+early_stopping_patience: 20
 gradient_clip: 1.0
 loss:
   brier_weight: 0.7
   csi_weight: 0.3
-  pos_weight: 3.0    # lowered from 16.5 — full ratio distorts Brier calibration (BSS -4)
+  # pos_weight=1.0: Brier Score is a proper scoring rule that self-calibrates.
+  # Setting pos_weight > 1 inflates predicted probabilities (upweights misses),
+  # producing negative BSS even when AUC is good.  Use 1.0 for calibrated output.
+  pos_weight: 1.0
   reg_weight: 0.2    # only active when dual_head: true
