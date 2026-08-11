@@ -117,3 +117,14 @@ def test_single_head_backward_compat():
     model = CropOSGNN(era5_in=7, metar_in=5, hidden=32, n_horizons=4)
     out = model(_make_graph())
     assert isinstance(out, torch.Tensor), "Single-head must return Tensor, not tuple"
+
+
+def test_dual_head_gradients_flow():
+    """Gradients must flow through both classification and regression heads."""
+    model = CropOSGNN(era5_in=7, metar_in=5, hidden=32, n_horizons=4, dual_head=True)
+    model.train()
+    probs, mm = model(_make_graph())
+    loss = probs.sum() + mm.sum()
+    loss.backward()
+    for name, param in model.named_parameters():
+        assert param.grad is not None, f"No gradient for {name}"
