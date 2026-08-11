@@ -85,3 +85,35 @@ def test_gnn_metar_features_constant():
     assert "precip_mm" in CropOSGNN.METAR_FEATURES
     assert "rain_event" in CropOSGNN.METAR_FEATURES
     assert "tmpf" in CropOSGNN.METAR_FEATURES
+
+
+def test_dual_head_output_shapes():
+    model = CropOSGNN(era5_in=7, metar_in=5, hidden=32, n_horizons=4, dual_head=True)
+    model.eval()
+    with torch.no_grad():
+        probs, mm = model(_make_graph())
+    assert probs.shape == (3, 4), f"Expected (3,4), got {probs.shape}"
+    assert mm.shape == (3, 4), f"Expected (3,4), got {mm.shape}"
+
+
+def test_dual_head_probs_in_range():
+    model = CropOSGNN(era5_in=7, metar_in=5, hidden=32, n_horizons=4, dual_head=True)
+    model.eval()
+    with torch.no_grad():
+        probs, mm = model(_make_graph())
+    assert (probs >= 0).all() and (probs <= 1).all()
+
+
+def test_dual_head_mm_non_negative():
+    model = CropOSGNN(era5_in=7, metar_in=5, hidden=32, n_horizons=4, dual_head=True)
+    model.eval()
+    with torch.no_grad():
+        probs, mm = model(_make_graph())
+    assert (mm >= 0).all(), "Regression head must output non-negative mm values"
+
+
+def test_single_head_backward_compat():
+    """dual_head=False (default) must still return a single tensor, not a tuple."""
+    model = CropOSGNN(era5_in=7, metar_in=5, hidden=32, n_horizons=4)
+    out = model(_make_graph())
+    assert isinstance(out, torch.Tensor), "Single-head must return Tensor, not tuple"

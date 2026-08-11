@@ -25,6 +25,7 @@ class CropOSGNN(nn.Module):
       stations added at inference without retraining.
 
     Output: (n_farms, n_horizons) precipitation probabilities in [0, 1].
+            When dual_head=True: tuple of (probs, mm_pred) both (n_farms, n_horizons).
     """
 
     METAR_FEATURES = [
@@ -41,6 +42,7 @@ class CropOSGNN(nn.Module):
         dropout: float = 0.1,
         metar_dropout: float = 0.4,
         metar_in: int | None = None,
+        dual_head: bool = False,
     ):
         super().__init__()
         # metar_in defaults to the 9-feature real-time METAR observation set.
@@ -48,6 +50,7 @@ class CropOSGNN(nn.Module):
         if metar_in is None:
             metar_in = len(self.METAR_FEATURES)
         self.metar_dropout = metar_dropout
+        self.dual_head = dual_head
 
         self.era5_proj = nn.Linear(era5_in, hidden)
         self.metar_proj = nn.Linear(metar_in, hidden)
@@ -71,7 +74,15 @@ class CropOSGNN(nn.Module):
             nn.Linear(hidden // 2, n_horizons), nn.Sigmoid(),
         )
 
-    def forward(self, data: HeteroData) -> torch.Tensor:
+        # Regression head: expected mm (non-negative via Softplus).
+        # Only instantiated when dual_head=True to keep checkpoints compact.
+        if dual_head:
+            self.reg_head = nn.Sequential(
+                nn.Linear(hidden, hidden // 2), nn.ReLU(), nn.Dropout(dropout),
+                nn.Linear(hidden // 2, n_horizons), nn.Softplus(),
+            )
+
+    def forward(self, data: HeteroData) -> "torch.Tensor | tuple[torch.Tensor, torch.Tensor]":
         x_metar = data["metar"].x
 
         # DropNode: randomly zero entire metar nodes during training.
@@ -101,4 +112,11 @@ class CropOSGNN(nn.Module):
                     x[node_type] = torch.relu(self.drop(new_x[node_type]))
                 # else: preserve embedding for source-only nodes (era5, metar in final layer)
 
-        return self.head(x["farm"])  # (n_farms, n_horizons)
+        farm_emb = x["farm"]
+        probs = self.head(farm_emb)  # (n_farms, n_horizons)
+
+        if self.dual_head:
+            mm_pred = self.reg_head(farm_emb)  # (n_farms, n_horizons), non-negative
+            return probs, mm_pred
+
+        return probs
