@@ -144,8 +144,8 @@ def per_horizon_report(
             "fp": conf["fp"],
             "tn": conf["tn"],
             "fn": conf["fn"],
-            "auc": roc_auc(p, l),
-            "rain_frac": float(l.mean()),
+            "auc": roc_auc(p, lbl),
+            "rain_frac": float(lbl.mean()),
             "pred_mean": float(p.mean()),
         }
     return report
