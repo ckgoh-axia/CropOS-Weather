@@ -40,7 +40,7 @@ class DualHeadLoss(nn.Module):
         brier_weight: Weight for Brier term.
         csi_weight:   Weight for CSI term.
         reg_weight:   Weight for regression (mm) Huber loss.
-        huber_delta:  Delta for Huber loss (in log space).
+        huber_delta:  Delta in log1p(mm) space; e.g. delta=1.0 ≈ 1.72 mm raw prediction error.
     """
 
     def __init__(

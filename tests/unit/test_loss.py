@@ -1,5 +1,5 @@
 # tests/unit/test_loss.py
-"""Tests for BrierCSILoss — combined Brier + soft-CSI training loss."""
+"""Tests for BrierCSILoss and DualHeadLoss training losses."""
 import pytest
 import torch
 
@@ -66,19 +66,19 @@ def test_dual_head_loss_returns_scalar():
     loss_fn = DualHeadLoss(brier_weight=0.5, csi_weight=0.3, reg_weight=0.2)
     probs = torch.rand(4, 3)
     labels = (torch.rand(4, 3) > 0.5).float()
-    mm_pred = torch.rand(4, 3).abs()
+    mm_pred = torch.rand(4, 3)
     mm_true = torch.rand(4, 3).abs()
     loss = loss_fn(probs, labels, mm_pred, mm_true)
     assert loss.shape == torch.Size([])
 
 
 def test_dual_head_loss_without_mm_equals_brier_csi():
-    """If reg_weight=0, DualHeadLoss must match BrierCSILoss exactly."""
+    """If reg_weight=0, DualHeadLoss must ignore mm inputs entirely."""
     brier = BrierCSILoss(brier_weight=0.7, csi_weight=0.3)
     dual = DualHeadLoss(brier_weight=0.7, csi_weight=0.3, reg_weight=0.0)
     probs = torch.rand(6, 4)
     labels = (torch.rand(6, 4) > 0.5).float()
-    mm_pred = torch.zeros(6, 4)
+    mm_pred = torch.rand(6, 4) * 50  # non-trivial mm values — must be ignored
     mm_true = torch.zeros(6, 4)
     assert abs(float(brier(probs, labels)) - float(dual(probs, labels, mm_pred, mm_true))) < 1e-5
 
@@ -93,3 +93,19 @@ def test_dual_head_loss_backward():
     loss.backward()
     assert probs.grad is not None
     assert mm_pred.grad is not None
+    assert not torch.isnan(probs.grad).any()
+    assert not torch.isnan(mm_pred.grad).any()
+
+
+def test_dual_head_loss_reg_term_contributes():
+    """DualHeadLoss with reg_weight>0 must differ from BrierCSILoss when mm predictions are wrong."""
+    brier = BrierCSILoss(brier_weight=0.5, csi_weight=0.3)
+    dual = DualHeadLoss(brier_weight=0.5, csi_weight=0.3, reg_weight=0.2)
+    torch.manual_seed(42)
+    probs = torch.rand(4, 3)
+    labels = (torch.rand(4, 3) > 0.5).float()
+    mm_pred = torch.rand(4, 3) * 20   # off from target
+    mm_true = torch.zeros(4, 3)       # target is no rain
+    cls_loss = float(brier(probs, labels))
+    combined_loss = float(dual(probs, labels, mm_pred, mm_true))
+    assert combined_loss > cls_loss, "Regression term must increase the loss when mm predictions are wrong"
