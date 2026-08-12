@@ -452,12 +452,16 @@ def train(
         # Computed once here; used every validation epoch.
         logger.info("Computing climatological base rate from training labels...")
         _clim_labels: list[np.ndarray] = []
-        _clim_loader = DataLoader(train_ds, batch_size=tcfg["batch_size"], shuffle=False, num_workers=0)
+        _clim_loader = DataLoader(
+            train_ds, batch_size=tcfg["batch_size"], shuffle=False, num_workers=0
+        )
         with torch.no_grad():
             for _b in _clim_loader:
                 _clim_labels.append(_b["farm"].y.cpu().float().numpy())
-        _clim_labels_cat = np.concatenate(_clim_labels, axis=0)   # (N_samples * n_farms, n_horizons)
-        clim_rate = _clim_labels_cat.mean(axis=0)                  # (n_horizons,) mean rain freq per horizon
+        # (N_samples * n_farms, n_horizons)
+        _clim_labels_cat = np.concatenate(_clim_labels, axis=0)
+        # (n_horizons,) mean rain frequency per horizon
+        clim_rate = _clim_labels_cat.mean(axis=0)
         bs_clim = float(np.mean((clim_rate - _clim_labels_cat) ** 2))
         logger.info(
             f"Clim base rate per horizon: {np.round(clim_rate, 3)}  |  BS_clim={bs_clim:.4f}"
@@ -572,7 +576,8 @@ def train(
                 )
             else:
                 print(
-                    f"Epoch {epoch:03d}: train={train_loss:.4f}  val={val_loss:.4f}  bss={bss:+.4f}",
+                    f"Epoch {epoch:03d}: train={train_loss:.4f}"
+                    f"  val={val_loss:.4f}  bss={bss:+.4f}",
                     flush=True,
                 )
 
@@ -598,7 +603,10 @@ def train(
                     )
                     break
 
-    print(f"Training complete. Best val loss: {best_val_loss:.4f}  BSS_clim={bs_clim:.4f}", flush=True)
+    print(
+        f"Training complete. Best val loss: {best_val_loss:.4f}  BSS_clim={bs_clim:.4f}",
+        flush=True,
+    )
     if _wandb_run is not None:
         _wandb_run.summary["best_val_loss"] = best_val_loss
         _wandb_run.finish()
