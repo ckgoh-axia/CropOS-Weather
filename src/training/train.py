@@ -448,23 +448,25 @@ def train(
 
         # ── climatological base rate (training labels) ───────────────────────
         # Needed for BSS = 1 - BS / BS_clim.
-        # BS_clim = mean((clim_rate - y)^2) where clim_rate = mean(y) over training set.
-        # Computed once here; used every validation epoch.
-        logger.info("Computing climatological base rate from training labels...")
+        # BS_clim uses the validation-set climatological base rate so the
+        # denominator matches the distribution the model is evaluated against.
+        # Using training labels here would bias BSS if rain frequency differs
+        # between train and val periods.
+        logger.info("Computing climatological base rate from validation labels...")
         _clim_labels: list[np.ndarray] = []
         _clim_loader = DataLoader(
-            train_ds, batch_size=tcfg["batch_size"], shuffle=False, num_workers=0
+            val_ds, batch_size=tcfg["batch_size"], shuffle=False, num_workers=0
         )
         with torch.no_grad():
             for _b in _clim_loader:
                 _clim_labels.append(_b["farm"].y.cpu().float().numpy())
-        # (N_samples * n_farms, n_horizons)
+        # (N_val_samples * n_farms, n_horizons)
         _clim_labels_cat = np.concatenate(_clim_labels, axis=0)
-        # (n_horizons,) mean rain frequency per horizon
+        # (n_horizons,) mean rain frequency per horizon in validation set
         clim_rate = _clim_labels_cat.mean(axis=0)
         bs_clim = float(np.mean((clim_rate - _clim_labels_cat) ** 2))
         logger.info(
-            f"Clim base rate per horizon: {np.round(clim_rate, 3)}  |  BS_clim={bs_clim:.4f}"
+            f"Val clim base rate per horizon: {np.round(clim_rate, 3)}  |  BS_clim={bs_clim:.4f}"
         )
         del _clim_labels, _clim_labels_cat, _clim_loader
 

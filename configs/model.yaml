@@ -11,13 +11,13 @@ gnn:
   era5_in: 11
   metar_in: 9
   hidden_channels: 256
-  dropout: 0.1
+  dropout: 0.2
   metar_dropout: 0.4
   dual_head: false
 
   # Temporal history: stack this many hourly snapshots as input features.
-  # Increase for longer memory (48 = full paper spec), decrease to save RAM.
-  history_steps: 6
+  # 24 = one full diurnal cycle; paper uses 48 (full spec).
+  history_steps: 24
 
   # Three-phase local message passing iterations (paper M=4).
   local_mp_steps: 4
