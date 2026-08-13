@@ -26,6 +26,7 @@ Parameters swept
     hidden_channels   : [128, 256]        — node embedding width
     learning_rate     : log-uniform       — [5e-5, 5e-4]
     era5_to_metar_k   : [4, 8]            — ERA5→metar bipartite k-NN
+    pos_weight        : [1.5, 2.5, 4.0, 6.0]  — BCE positive-class weight (miss vs FA)
 
 Optimisation target
 -------------------
@@ -69,6 +70,13 @@ SWEEP_CONFIG: dict = {
         "era5_to_metar_k": {
             "values": [4, 8],
         },
+        "pos_weight": {
+            # Controls the miss vs false-alarm tradeoff in BCE loss.
+            # 1.0 → near base-rate predictions (POD ~13%); BSS ≈ 0
+            # 6.0 → aggressively detects rain but inflates probabilities
+            # Bayesian search finds the calibration sweet-spot automatically.
+            "values": [1.5, 2.5, 4.0, 6.0],
+        },
     },
 }
 
@@ -76,15 +84,16 @@ SWEEP_CONFIG: dict = {
 def _sweep_train_fn(local_data_dir: str | None = None) -> None:
     """Single trial function called by the W&B agent.
 
-    W&B initialises the run before calling this function.  We read the
-    sampled hyperparameters from wandb.config and forward them to train()
-    as the `overrides` dict.  train() detects the active wandb.run and
-    reuses it instead of calling wandb.init() again.
+    The agent does NOT call wandb.init() — the trial function must do it.
+    Once init() is called the agent-populated config is available via
+    wandb.config.  train() detects the active wandb.run and reuses it
+    instead of calling wandb.init() again.
     """
     import wandb
 
     from src.training.train import train
 
+    wandb.init()  # connect to agent-assigned run; populates wandb.config
     cfg = dict(wandb.config)
     print(f"[sweep] trial config: {cfg}", flush=True)
     train(overrides=cfg, local_data_dir=local_data_dir)
