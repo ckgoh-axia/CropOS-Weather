@@ -7,8 +7,10 @@ gradient_clip: 1.0
 loss:
   brier_weight: 0.7
   csi_weight: 0.3
-  # pos_weight=1.0: Brier Score is a proper scoring rule that self-calibrates.
-  # Setting pos_weight > 1 inflates predicted probabilities (upweights misses),
-  # producing negative BSS even when AUC is good.  Use 1.0 for calibrated output.
-  pos_weight: 1.0
+  # pos_weight: controls miss vs false-alarm tradeoff.
+  # 1.0  → model predicts near base-rate everywhere, BSS ≈ 0, POD ≈ 13%
+  # 16.5 → extreme upweighting, probabilities inflated, BSS strongly negative
+  # 2.5  → moderate push toward detecting rain, targets POD > 30% without
+  #         catastrophic calibration loss.  Tune via sweep if needed.
+  pos_weight: 2.5
   reg_weight: 0.2    # only active when dual_head: true
