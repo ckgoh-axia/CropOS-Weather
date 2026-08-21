@@ -281,7 +281,7 @@ present in the superseded plan's data source:
 
 ```
 s3://noaa-nws-graphcastgfs-pds/
-  graphcastgfs.20240205/   ← archive from 2024-02-05
+  graphcastgfs.20240205/   ← directory tree exists from 2024-02-05
   aigfs.20260416/          ← newer EAGLE model, from 2026-04
 ```
 
@@ -292,8 +292,16 @@ NOAA runs GraphCast operationally, free, from GFS initial conditions.
    stations, that is the bar. Measuring only against raw GFS would be a straw
    man. Phase 0 measures both (§8).
 
-Archive begins 2024-02, so as a *prior* it constrains the fine-tune window;
-as a *benchmark* it applies to validation and test regardless.
+**"Archive exists" is not "byte-range fetchable" — these are two different
+dates.** The `graphcastgfs.YYYYMMDD/` directories and GRIB data files exist
+from 2024-02-05 and return HTTP 200 throughout. But `fetch_point_values`
+locates a message's byte range via the `.idx` sidecar file, and that sidecar
+is not published until later: verified counts in `forecasts_13_levels/` —
+`20240424/00` has 0 `.idx` files, `20240428/00` has 40, `20240501/00` has 40,
+`20250630/18` has 65. The archive is therefore only usable by this pipeline
+from **2024-05-01**, not 2024-02-05. As a *prior* it constrains the
+fine-tune window to start no earlier than 2024-05-01; as a *benchmark* it
+applies to validation and test regardless.
 
 ### 4.5 What is not obtainable
 
@@ -306,9 +314,26 @@ as a *benchmark* it applies to validation and test regardless.
 ### 4.6 Labels
 
 - **Training label:** ERA5 `precipitation` at the nearest grid point to each
-  farm node, thresholded at 1.0 mm — unchanged. Dense and gap-free.
-- **Reporting label:** METAR `precip_mm` with a validity mask. Headline BSS is
-  reported against real observations.
+  farm node, thresholded at 1.0 mm — unchanged. Measured (not assumed) dense
+  and gap-free: 20,197,980 rows over 2024-05-01..2025-06-30 with 0 nulls and
+  0 NaNs, measured 2026-08-22 against `era5_recent.parquet`. This was
+  previously an unverified assumption in this spec; the Phase 0 harness now
+  checks the raw frame for null-but-present rows before they can reach label
+  construction and refuses to proceed if any are found, rather than trusting
+  this measurement to still hold on a future re-run against different data.
+- **Reporting label:** ~~METAR `precip_mm` with a validity mask~~ — **not
+  usable.** The Thai ASOS feed the METAR ingestion reads has no `p01i`
+  column, so `src/ingestion/metar.py:141`'s
+  `pd.to_numeric(df.get("p01i", 0), ...)` falls back to its literal `0`
+  default for every row: `precip_mm` is identically zero across the entire
+  archive (verified independently, 1,034,434 rows, min/max/sum all 0.0).
+  The Phase 0 harness instead uses `rain_event` — an occurrence flag derived
+  from present-weather codes (RA/TS/SH), with no accumulated depth. **This
+  is a different event from the training label's `era5_rain` ≥1.0 mm
+  accumulated-depth threshold — they are not directly comparable, and the
+  harness's report keeps that warning prominent next to every `metar_rain`
+  table.** Headline BSS is reported against `era5_rain`; the `metar_rain`
+  table is a secondary observational sanity check only, never a gate input.
 
 Labels are needed only offline, so ERA5's latency is irrelevant to production.
 **No production input depends on ERA5.**
@@ -330,6 +355,22 @@ low-coverage stations are never averaged silently.
 | Fine-tune | 2024-02 → 2025-06 | ~2.1k | active |
 | Validation | 2025-07 → 2025-12 | ~0.7k | active |
 | Test | 2026-01 → 2026-06 | ~0.7k | active |
+
+**Caveat on "Residual head: active" for the first ~3 months of Fine-tune
+(2024-02-05 → 2024-04-30):** GraphCast-GFS's `.idx` byte-range sidecars —
+required to fetch it as the residual head's prior — are not actually
+fetchable until 2024-05-01, even though the `graphcastgfs.YYYYMMDD/`
+directories exist from 2024-02-05 (§4.4 — "archive exists" and "byte-range
+fetchable" are different dates). The Fine-tune window's declared start
+(2024-02-05) is kept as the leakage-protection boundary (it is what
+`FIT_START` in `scripts/phase0_benchmark.py` bounds `--start`/`--end`
+against, and matches the plan's stated calibration window), but a residual
+head trained or evaluated against a GraphCast prior in
+2024-02-05..2024-04-30 has no real prior to draw on for those dates —
+implementation must either fall back to climatology there or treat that
+sub-window as pretrain-like. `GRAPHCAST_IDX_FROM` (2024-05-01) is the
+separate, practical constant for "GraphCast is actually fetchable from
+here" — see the code comment.
 
 Hourly station samples give ~6× these counts at the decoder. ≥72 h embargo at
 every boundary (§4.3). Test is touched once, at the end.
@@ -468,8 +509,17 @@ changes:
 
 Before any architecture work:
 
-1. Pull GFS `precipitation` at leads 24 h and 48 h for the 16 stations,
-   2024-02 → 2026-06, from NOAA AWS, respecting §4.3.
+1. Pull GFS `precipitation` at leads 24 h and 48 h for the 16 stations, over
+   the fine-tune window only — **2024-02-05 → 2025-06-30**, not into
+   validation or test — from NOAA AWS, respecting §4.3. (In practice the
+   GraphCast-GFS half of this cannot start before 2024-05-01 — see §4.4 —
+   so a real run's usable range is 2024-05-01 → 2025-06-30; the harness
+   refuses `--start`/`--end` outside 2024-02-05..2025-06-30 entirely unless
+   overridden with `--allow-outside-fit-window`, since the calibration fit
+   must never touch validation/test data. This is a correction from an
+   earlier revision of this section, which asked for 2024-02 → 2026-06 —
+   an interval that reaches straight through validation and test. The
+   implemented refusal is correct; this text was wrong.)
 2. Pull the same from operational GraphCast-GFS (§4.4).
 3. Fit 1-D logistic calibrations from precip mm to rain probability on the
    fine-tune window only.
@@ -479,9 +529,20 @@ Before any architecture work:
 **The better of the two is the bar**, and it seeds `a`, `b` in §3.4 and
 selects the prior.
 
-**Gate:** if the best calibrated prior is near zero or negative at 48 h over
-Thailand, there is little to correct and the design must be revisited before
-the grid download is commissioned. Stop and report rather than proceeding.
+**Gate (as implemented):** the best calibrated prior's **out-of-sample**
+Brier Skill Score at 48 h (fit on the earliest 70% of fine-tune-window days,
+scored on the held-out latest 30% — never the same rows) must exceed
+**0.02**, AND the **scored coverage** at 48 h for that model (rows actually
+matched between GFS and GraphCast-GFS and scored against `era5_rain`,
+divided by expected rows) must be **≥ 90%**. Both conditions are required;
+"near zero or negative" from an earlier revision of this section undersold
+the coverage requirement entirely and described the BSS threshold as an
+informal boundary rather than the two-part pass/fail rule now enforced by
+`scripts/phase0_benchmark.py`'s `GATE_MIN_BSS_48H` / `GATE_MIN_COVERAGE`. If
+either condition fails, there is too little to correct (or too little of
+the run actually landed to trust the number), and the design must be
+revisited before the grid download is commissioned. Stop and report rather
+than proceeding.
 
 ---
 

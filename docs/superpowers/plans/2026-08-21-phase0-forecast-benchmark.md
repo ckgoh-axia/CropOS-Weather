@@ -682,6 +682,42 @@ forecast for free."
 
 ## Task 4: Phase 0 benchmark script and gate
 
+> **⚠ SUPERSEDED LISTING — DO NOT COPY.** Step 1 below embeds the
+> **pre-fix-round-1/2** version of `phase0_benchmark.py`, kept verbatim here
+> only as a historical record of what Task 4 originally produced. It has
+> since been fixed twice (fix-round-1, fix-round-2) and once more in a final
+> whole-branch review; none of those fixes are reflected in the listing
+> below. **The committed `scripts/phase0_benchmark.py` on disk is the only
+> authoritative version — always read and run that file, never re-derive it
+> from this listing.** Four defects specifically in the embedded listing,
+> so a reader cannot copy them by accident:
+>
+> 1. `GATE_MIN_BSS_48H = 0.0` **and no coverage condition at all** in the
+>    gate — the shipped script uses `GATE_MIN_BSS_48H = 0.02` **and**
+>    requires scored coverage ≥ 90% (`GATE_MIN_COVERAGE`). The listing's
+>    gate would PASS on noise alone.
+> 2. Calibration is fitted and scored **on the same rows** — no
+>    fit/score split at all. This let a simulated zero-information
+>    predictor pass 20/20 trials in testing (Task 4 fix-round-1 Critical
+>    2). The shipped script fits on the earliest 70% of issuance dates and
+>    scores only on the held-out latest 30% (`_temporal_split`).
+> 3. `forecasts.parquet` is cached wholesale and reused if present, with
+>    **no coverage assertion** — a partially-failed fetch silently looks
+>    "done" forever. The shipped script checkpoints per-day shards, writes a
+>    shard only when that day's fetch is fully complete, and always rebuilds
+>    `forecasts.parquet` from exactly the shards present for the requested
+>    window (fix-round-2 NEW-2).
+> 4. The Self-Review below claims "Fit 1-D logistic calibration on the
+>    fine-tune window only" with **no mention of an out-of-sample split** —
+>    consistent with defect 2, and equally wrong about what the shipped
+>    script does.
+>
+> See also: the embedded listing's GraphCast-GFS date comment and default
+> paths are stale (fixed doc-wide references use 2024-05-01 as the actual
+> fetchable start, and `era5_recent.parquet` as the labels filename); those
+> are lower-stakes than the four defects above but are further reasons not
+> to copy this block.
+
 **Files:**
 - Create: `scripts/phase0_benchmark.py`
 
@@ -692,7 +728,7 @@ forecast for free."
 **Scope decisions, and why:**
 - **00Z runs only, one issuance per day.** 880 days × 2 horizons × 2 models ≈ 3,520 byte-range fetches. Ample statistically (880 days × 16 stations × 2 horizons) and keeps the measurement to hours rather than days.
 - **6-hour accumulation window ending at the horizon.** The finest resolution GraphCast-GFS supports natively — it emits only f006/f012/f018/f024/…
-- **Window 2024-02-05 → 2025-06-30** (fine-tune window; GraphCast-GFS archive starts 2024-02-05). Validation and test windows are not touched.
+- **Window 2024-02-05 → 2025-06-30** (fine-tune window, per spec §4.7). Validation and test windows are not touched. Note: the `graphcastgfs.YYYYMMDD/` archive *directories* exist from 2024-02-05, but the `.idx` byte-range sidecars this script's fetcher requires are not actually fetchable until **2024-05-01** (verified: `forecasts_13_levels/20240428/00` has 40 `.idx` files, `20240424/00` has 0). "Archive exists" and "byte-range fetchable" are different dates — a real run therefore only gets GraphCast-GFS rows from 2024-05-01 onward even though the window nominally starts 2024-02-05; see `GRAPHCAST_IDX_FROM` in the committed script.
 
 - [ ] **Step 1: Write the script**
 
@@ -993,7 +1029,7 @@ if __name__ == "__main__":
 
 ```bash
 PYTHONPATH=. python scripts/phase0_benchmark.py \
-  --labels data/raw/era5_thailand.parquet \
+  --labels data/raw/era5_recent.parquet \
   --metar data/raw/metar_thai.parquet \
   --out /tmp/phase0_smoke \
   --start 2024-06-01 --end 2024-06-03
@@ -1031,7 +1067,7 @@ benchmark that cheats would set the bar too high."
 
 ```bash
 PYTHONPATH=. python scripts/phase0_benchmark.py \
-  --labels data/raw/era5_thailand.parquet \
+  --labels data/raw/era5_recent.parquet \
   --metar data/raw/metar_thai.parquet \
   --out data/phase0
 ```
@@ -1040,18 +1076,38 @@ Expected runtime: 2–5 hours (≈3,500 byte-range fetches). `forecasts.parquet`
 - [ ] **Step 6: Commit results and report the gate**
 
 ```bash
-git add data/phase0/report.md data/phase0/gate.json
+# `data/` is gitignored, so a plain `git add data/phase0/...` stages
+# nothing and this commit would silently be empty. Force-add the two
+# report artifacts specifically (do NOT force-add data/phase0/shards/ or
+# forecasts.parquet — those are large, regenerable, and meant to stay
+# untracked):
+git add -f data/phase0/report.md data/phase0/gate.json
 git commit -m "chore(phase0): benchmark results and gate verdict"
 ```
 
 **STOP HERE.** Report the gate outcome before any further work:
 
-- **PASS** (best calibrated 48 h BSS > 0) → proceed to the main implementation plan; `calibration_a` / `calibration_b` seed the residual head's prior (spec §3.4), and the winning model becomes both prior and benchmark (spec §4.4).
-- **FAIL** → do not commission the grid download. Report and revisit the design with the owner, per spec §8.
+- **PASS** (out-of-sample BSS at 48 h > 0.02 **and** scored coverage at 48 h
+  ≥ 90% — both required, per the implemented gate in
+  `scripts/phase0_benchmark.py`, not just "BSS > 0") → proceed to the main
+  implementation plan; `calibration_a` / `calibration_b` seed the residual
+  head's prior (spec §3.4), and the winning model becomes both prior and
+  benchmark (spec §4.4).
+- **FAIL** (either condition not met) → do not commission the grid
+  download. Report and revisit the design with the owner, per spec §8.
 
 ---
 
 ## Self-Review
+
+**⚠ This Self-Review describes the listing embedded in Task 4 Step 1, which
+is superseded — see the banner at the top of Task 4.** In particular the
+"Fit 1-D logistic calibration on the fine-tune window only" line below
+predates fix-round-1's in-sample/out-of-sample split and the gate's
+coverage condition; it does not describe the committed
+`scripts/phase0_benchmark.py`. Read that file's own module docstring and
+`_score_cell`/`_temporal_split` docstrings for the current, authoritative
+behaviour.
 
 **Spec coverage (§8 Phase 0):**
 - ✓ Pull GFS precip at 24 h/48 h for 16 stations, 2024-02 → present, respecting §4.3 — Task 4 `fetch_forecasts` via `select_run`

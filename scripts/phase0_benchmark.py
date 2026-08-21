@@ -60,9 +60,26 @@ FORECAST_COLS = [
     "station", "precip_mm",
 ]
 
-# GraphCast-GFS archive begins here; the fine-tune window starts with it.
+# Fine-tune window per spec §4.7 — the boundary the calibration fit must
+# never cross into validation/test data (see --allow-outside-fit-window
+# below). This is a DESIGN boundary, not a data-availability one: it is NOT
+# the same thing as GRAPHCAST_IDX_FROM below, and conflating the two once
+# meant a real run's --start defaulted to a date GraphCast-GFS could not
+# actually be fetched from.
 FIT_START = pd.Timestamp("2024-02-05", tz="UTC")
 FIT_END = pd.Timestamp("2025-06-30", tz="UTC")
+
+# Earliest date GraphCast-GFS is actually byte-range fetchable. The
+# graphcastgfs.YYYYMMDD/ *directories* exist from 2024-02-05 (spec §4.4),
+# but the .idx sidecars fetch_point_values() requires to locate a message's
+# byte range are not published until later — verified against
+# forecasts_13_levels/: 20240424/00 has 0 .idx files, 20240428/00 has 40,
+# 20240501/00 has 40, 20250630/18 has 65 (the GRIB data files themselves
+# return HTTP 200 throughout; only the index is missing before this date).
+# A real Phase 0 run should default --start to THIS, not FIT_START:
+# anything in [FIT_START, GRAPHCAST_IDX_FROM) will fetch GFS fine but fail
+# every GraphCast-GFS request, eroding scored coverage for no benefit.
+GRAPHCAST_IDX_FROM = pd.Timestamp("2024-05-01", tz="UTC")
 
 # Gate: the best calibrated prior must clear a small margin above sampling
 # noise on OUT-OF-SAMPLE BSS (never in-sample — a 2-parameter logistic fit
@@ -287,11 +304,19 @@ def _read_era5_window(path: Path, needed_ts: set[pd.Timestamp]) -> pd.DataFrame:
 
     era5_recent.parquet is ~60.7M rows. A 17-month date-range filter alone
     still reads ~24M rows though only 6 of every 24 hours (the accumulation
-    window is always 18:00-23:00 UTC of the day before a 00Z-aligned valid
-    time) are ever used. Filtering to the exact needed timestamps instead of
-    a range narrows this to what the label builder actually touches
-    (Important 4). The filter is strictly narrowing — it cannot change label
-    values.
+    window for a 00Z-aligned valid time vt is [vt-5h, vt], i.e. 19:00
+    through 00:00 UTC of the day before — matching GFS's own "24-30 hour
+    acc fcst" style 6-hour buckets) are ever used. Filtering to the exact
+    needed timestamps instead of a range narrows this to what the label
+    builder actually touches (Important 4).
+
+    NOTE: this filter is narrowing on ROWS but is not provably inert on
+    label VALUES: `_build_era5_label_df` derives its nearest-grid-point-per-
+    station mapping from whatever set of (lat, lon) points survives the
+    filter, so a grid point that happens to be absent from the selected
+    hours (but present at other hours) could in principle change which
+    ERA5 cell a station is mapped to. It is not a no-op filter to reason
+    about casually.
     """
     ts_list = sorted(needed_ts)
     return pq.read_table(
@@ -325,7 +350,8 @@ def build_labels(
         metar_valid — whether metar_rain is determinate (station reported
                       at least one hour in the window).
 
-    diagnostics: {"era5_windows_total", "era5_windows_dropped_incomplete"}
+    diagnostics: {"era5_windows_total", "era5_windows_dropped_incomplete",
+                  "era5_raw_null_precip_rows"}
 
     Note: METAR's precip_mm is deliberately not used. The Thai ASOS feed has
     no p01i column, so upstream (src/ingestion/metar.py) precip_mm is filled
@@ -334,6 +360,24 @@ def build_labels(
     all 0.0). Fitting a logistic calibration against it raises immediately
     on a single-class label and previously crashed a multi-hour run with
     nothing written (Task 4 fix-round-1 Critical 1).
+
+    CRITICAL — a null-but-present ERA5 row must never read as "0.0 mm,
+    complete". `_build_era5_label_df` (src/features/dataset.py, shared with
+    CropOSDataset and therefore out of scope to change here) does
+    `pd.to_numeric(..., errors="coerce").fillna(0.0)` on `precip_mm`. That
+    turns a genuinely-missing observation into a clean-looking dry reading
+    BEFORE this function's own "any hour missing -> NaN -> drop the window"
+    check ever sees it — that check only catches a grid point that is
+    wholly ABSENT from the frame, not one that is present with a null
+    value, so `era5_windows_dropped_incomplete` would silently read 0 even
+    if every row were null. We therefore check the RAW frame here, before
+    it reaches `_build_era5_label_df`, and refuse to proceed if any row is
+    null (fail loudly per spec §9's "assert non-null fraction ... and fail
+    loudly", rather than attempt to re-derive per-station-window dropping
+    outside dataset.py's nearest-grid-point mapping, which would duplicate
+    and risk diverging from that logic). See report.md / gate.json's
+    `era5_raw_null_precip_rows` — it is always 0 by the time a report is
+    written, because a nonzero count halts the run right here.
     """
     from src.features.dataset import _build_era5_label_df
 
@@ -342,6 +386,19 @@ def build_labels(
     needed_ts = {vt - o for vt in unique_vt for o in offsets}
 
     era5 = _read_era5_window(era5_path, needed_ts)
+    n_null = int(era5["precipitation"].isna().sum())
+    if n_null > 0:
+        raise SystemExit(
+            f"REFUSING TO PROCEED: {n_null:,} of {len(era5):,} raw ERA5 rows "
+            "in the needed window have a null 'precipitation' value. "
+            "_build_era5_label_df's fillna(0.0) would silently convert "
+            "these to 0.0 mm labels marked complete — exactly the failure "
+            "this benchmark exists to prevent (spec §4.3 / this project's "
+            "prior five-year null-to-zero incident). Investigate the ERA5 "
+            "source parquet for the affected timestamps before re-running "
+            "Phase 0. This is not a per-window drop — the run has stopped "
+            "entirely so no gate.json/report.md is written from tainted data."
+        )
     era5_lbl = _build_era5_label_df(era5, STATION_COORDS, list(STATION_COORDS))
     era5_lbl = era5_lbl.set_index(["timestamp", "station"]).sort_index()
 
@@ -383,6 +440,10 @@ def build_labels(
     diagnostics = {
         "era5_windows_total": era5_windows_total,
         "era5_windows_dropped_incomplete": era5_windows_dropped,
+        # Always 0 here — see the docstring: a nonzero raw-null count halts
+        # the run above, before this point is ever reached. Recorded anyway
+        # so report.md/gate.json show the check ran rather than omit it.
+        "era5_raw_null_precip_rows": n_null,
     }
     return pd.DataFrame(rows), diagnostics
 
@@ -556,13 +617,10 @@ def _model_view(matched: pd.DataFrame, suffix: str) -> pd.DataFrame:
     )
 
 
-def _score_pair(
-    matched: pd.DataFrame, label_col: str, mask_col: str | None, cell_name: str
-) -> dict:
+def _score_pair(matched: pd.DataFrame, label_col: str, cell_name: str) -> dict:
     """Same fit/score temporal-split discipline as _score_cell, applied to
     the reference-forecast comparison (GraphCast-GFS vs raw GFS)."""
-    view = matched[matched[mask_col]] if mask_col else matched
-    sub = view[np.isfinite(view[label_col].astype(float))]
+    sub = matched[np.isfinite(matched[label_col].astype(float))]
     n = int(len(sub))
     if n < MIN_CELL_N:
         return {"status": "insufficient", "n": n}
@@ -696,7 +754,7 @@ def main() -> None:
     ap.add_argument("--labels", required=True, help="era5_recent.parquet")
     ap.add_argument("--metar", required=True, help="metar_thai.parquet")
     ap.add_argument("--out", default="data/phase0")
-    ap.add_argument("--start", default=str(FIT_START.date()))
+    ap.add_argument("--start", default=str(GRAPHCAST_IDX_FROM.date()))
     ap.add_argument("--end", default=str(FIT_END.date()))
     ap.add_argument(
         "--allow-outside-fit-window",
@@ -718,6 +776,15 @@ def main() -> None:
             "override deliberately."
         )
 
+    # Fail in seconds, not hours: a typo'd --labels/--metar path would
+    # otherwise only surface after the multi-hour fetch loop, in
+    # build_labels(), wasting the entire run.
+    labels_path = Path(args.labels)
+    metar_path = Path(args.metar)
+    missing = [str(p) for p in (labels_path, metar_path) if not p.exists()]
+    if missing:
+        raise SystemExit(f"input file(s) not found: {', '.join(missing)}")
+
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     shard_dir = out / "shards"
@@ -735,7 +802,7 @@ def main() -> None:
         _write_empty_window_report(out, args, n_days, fetch_stats)
         return
 
-    lbl, label_diag = build_labels(Path(args.labels), Path(args.metar), fc["valid_time"])
+    lbl, label_diag = build_labels(labels_path, metar_path, fc["valid_time"])
     df = fc.merge(lbl, on=["valid_time", "station"], how="inner")
     matched_by_h = {h: _build_matched(df, h) for h in HORIZONS_H}
 
@@ -764,6 +831,15 @@ def main() -> None:
         f"{label_diag['era5_windows_dropped_incomplete']:,} dropped "
         "(fewer than all 6 hours present in the accumulation window — a "
         "partial sum would silently under-count rain)."
+    )
+    lines.append(
+        f"ERA5 raw null precipitation rows in the needed window: "
+        f"{label_diag['era5_raw_null_precip_rows']:,} (checked on the raw "
+        "frame before label construction — a null-but-present row would "
+        "otherwise be silently filled to 0.0 mm and reported as complete; "
+        "a nonzero count here means the run FAILED LOUDLY earlier and this "
+        "line would not exist, so 0 is the only value that can ever be "
+        "printed here)."
     )
     lines.append("")
 
@@ -880,7 +956,7 @@ def main() -> None:
     )
     lines.append("|---|---|---|---|---|---|")
     for h in HORIZONS_H:
-        cell = _score_pair(matched_by_h[h], "era5_rain", None, f"graphcast_vs_gfs_{h}h")
+        cell = _score_pair(matched_by_h[h], "era5_rain", f"graphcast_vs_gfs_{h}h")
         results[f"graphcast_vs_gfs_{h}h"] = cell
         if cell["status"] == "ok":
             verdict = (

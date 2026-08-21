@@ -108,9 +108,30 @@ def fetch_point_values(
     entries = parse_idx(idx.text)
     msg = find_message(entries, pattern)
 
-    end = "" if msg["stop"] is None else str(msg["stop"] - 1)
-    headers = {"Range": f"bytes={msg['start']}-{end}"}
+    start, stop = msg["start"], msg["stop"]
+    end = "" if stop is None else str(stop - 1)
+    headers = {"Range": f"bytes={start}-{end}"}
     resp = requests.get(f"{bucket}/{key}", headers=headers, timeout=REQUEST_TIMEOUT_S)
     resp.raise_for_status()
+
+    # A proxy or CDN that strips the Range header returns 200 with the
+    # WHOLE object instead of 206 with just the requested bytes. Decoding
+    # that as if it were the single requested GRIB message would silently
+    # feed the wrong message's bytes to cfgrib — accept only a real partial
+    # response, and only if it's exactly the length we asked for.
+    if resp.status_code != 206:
+        raise ValueError(
+            f"Range request not honoured for {bucket}/{key}: expected HTTP "
+            f"206 Partial Content, got {resp.status_code}. A proxy may be "
+            "stripping the Range header."
+        )
+    if stop is not None:
+        expected_len = stop - start
+        if len(resp.content) != expected_len:
+            raise ValueError(
+                f"Range response for {bucket}/{key} has {len(resp.content)} "
+                f"bytes, expected {expected_len} (bytes={start}-{end}). A "
+                "proxy may have altered the response."
+            )
 
     return _decode_points(resp.content, coords)

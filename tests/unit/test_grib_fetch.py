@@ -57,12 +57,20 @@ def test_find_message_raises_when_absent():
         find_message(entries, "NOSUCHVAR:surface:24 hour fcst")
 
 
+def _msg_len() -> int:
+    entries = parse_idx(_IDX)
+    msg = find_message(entries, "APCP:surface:18-24 hour acc fcst")
+    return msg["stop"] - msg["start"]
+
+
 @patch("src.ingestion.grib_fetch.requests.get")
 def test_fetch_point_values_requests_only_the_needed_bytes(mock_get):
     from src.ingestion.grib_fetch import fetch_point_values
 
     idx_response = MagicMock(status_code=200, text=_IDX)
-    grib_response = MagicMock(status_code=206, content=b"GRIB-BYTES")
+    # Content length must match the requested byte range exactly, or the
+    # new honoured-Range check (below) rejects it.
+    grib_response = MagicMock(status_code=206, content=b"x" * _msg_len())
     mock_get.side_effect = [idx_response, grib_response]
 
     with patch("src.ingestion.grib_fetch._decode_points", return_value={"VTUU": 1.5}):
@@ -77,3 +85,43 @@ def test_fetch_point_values_requests_only_the_needed_bytes(mock_get):
     # Second call must be a bounded Range request, not a full download.
     _, kwargs = mock_get.call_args_list[1]
     assert kwargs["headers"]["Range"] == "bytes=421726683-422103205"
+
+
+@patch("src.ingestion.grib_fetch.requests.get")
+def test_fetch_point_values_rejects_unhonoured_range(mock_get):
+    """A proxy that strips Range returns 200 + the whole object instead of
+    206 + just the requested bytes. Silently decoding that would feed the
+    wrong message to cfgrib — must raise instead."""
+    from src.ingestion.grib_fetch import fetch_point_values
+
+    idx_response = MagicMock(status_code=200, text=_IDX)
+    grib_response = MagicMock(status_code=200, content=b"x" * _msg_len())
+    mock_get.side_effect = [idx_response, grib_response]
+
+    with pytest.raises(ValueError, match="206"):
+        fetch_point_values(
+            BUCKET_GFS,
+            "gfs.20260801/00/atmos/gfs.t00z.pgrb2.0p25.f024",
+            "APCP:surface:18-24 hour acc fcst",
+            {"VTUU": (15.25, 104.87)},
+        )
+
+
+@patch("src.ingestion.grib_fetch.requests.get")
+def test_fetch_point_values_rejects_wrong_length_range(mock_get):
+    """206 but a body of the wrong length means something altered the
+    response in transit — must raise rather than decode a truncated or
+    padded message."""
+    from src.ingestion.grib_fetch import fetch_point_values
+
+    idx_response = MagicMock(status_code=200, text=_IDX)
+    grib_response = MagicMock(status_code=206, content=b"x" * (_msg_len() - 1))
+    mock_get.side_effect = [idx_response, grib_response]
+
+    with pytest.raises(ValueError, match="bytes"):
+        fetch_point_values(
+            BUCKET_GFS,
+            "gfs.20260801/00/atmos/gfs.t00z.pgrb2.0p25.f024",
+            "APCP:surface:18-24 hour acc fcst",
+            {"VTUU": (15.25, 104.87)},
+        )

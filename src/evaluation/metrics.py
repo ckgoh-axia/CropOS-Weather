@@ -68,7 +68,15 @@ def brier_skill_score_vs_reference(
     """
     bs_model = brier_score(probs, labels)
     bs_ref = brier_score(reference, labels)
-    return np.where(bs_ref > 1e-9, 1.0 - bs_model / bs_ref, 0.0)
+    # np.where(cond, a/b, 0.0) evaluates BOTH branches eagerly, so a/b is
+    # computed (and its 0/0 division warned about) even on elements where
+    # bs_ref <= 1e-9. np.divide's `where=` skips the division entirely on
+    # those elements instead, leaving the pre-filled `out` value (0.0) —
+    # same result, no RuntimeWarning.
+    ratio = np.divide(
+        bs_model, bs_ref, out=np.zeros_like(bs_model, dtype=float), where=bs_ref > 1e-9
+    )
+    return np.where(bs_ref > 1e-9, 1.0 - ratio, 0.0)
 
 
 def binary_confusion_stats(
