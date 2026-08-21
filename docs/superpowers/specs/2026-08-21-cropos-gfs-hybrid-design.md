@@ -338,8 +338,8 @@ applies to validation and test regardless.
 Labels are needed only offline, so ERA5's latency is irrelevant to production.
 **No production input depends on ERA5.**
 
-**Target mismatch must be corrected explicitly.** ERA5 grid-cell-mean precip
-≥1 mm and METAR point precip ≥1 mm are different events. A recalibration
+**Target mismatch must be corrected explicitly.** ERA5 grid-cell-mean accumulation
+≥1 mm and METAR `rain_event` occurrence are different events. A recalibration
 fitted on the fine-tune window only maps one to the other; without it the
 reported number carries a systematic offset.
 

@@ -726,7 +726,7 @@ forecast for free."
 - Produces: `data/phase0/forecasts.parquet`, `data/phase0/report.md`, `data/phase0/gate.json`.
 
 **Scope decisions, and why:**
-- **00Z runs only, one issuance per day.** 880 days × 2 horizons × 2 models ≈ 3,520 byte-range fetches. Ample statistically (880 days × 16 stations × 2 horizons) and keeps the measurement to hours rather than days.
+- **00Z runs only, one issuance per day.** 426 days × 2 horizons × 2 models ≈ 1,704 byte-range fetches. Ample statistically (426 days × 16 stations × 2 horizons = 13,632 rows per model) and keeps the measurement to hours rather than days. (Measurement window is 2024-05-01 → 2025-06-30 = 426 days; GraphCast-GFS `.idx` byte-range sidecars are not fetchable before 2024-05-01.)
 - **6-hour accumulation window ending at the horizon.** The finest resolution GraphCast-GFS supports natively — it emits only f006/f012/f018/f024/…
 - **Window 2024-02-05 → 2025-06-30** (fine-tune window, per spec §4.7). Validation and test windows are not touched. Note: the `graphcastgfs.YYYYMMDD/` archive *directories* exist from 2024-02-05, but the `.idx` byte-range sidecars this script's fetcher requires are not actually fetchable until **2024-05-01** (verified: `forecasts_13_levels/20240428/00` has 40 `.idx` files, `20240424/00` has 0). "Archive exists" and "byte-range fetchable" are different dates — a real run therefore only gets GraphCast-GFS rows from 2024-05-01 onward even though the window nominally starts 2024-02-05; see `GRAPHCAST_IDX_FROM` in the committed script.
 
@@ -1071,7 +1071,7 @@ PYTHONPATH=. python scripts/phase0_benchmark.py \
   --metar data/raw/metar_thai.parquet \
   --out data/phase0
 ```
-Expected runtime: 2–5 hours (≈3,500 byte-range fetches). `forecasts.parquet` is checkpointed, so a re-run resumes rather than restarts.
+Expected runtime: 1.5–2 hours (≈1,704 byte-range fetches). Results are written as per-day shards for complete days only, so a re-run resumes from the latest complete day rather than restarting.
 
 - [ ] **Step 6: Commit results and report the gate**
 
