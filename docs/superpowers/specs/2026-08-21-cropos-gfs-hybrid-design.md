@@ -95,7 +95,7 @@ correction framing is both cheaper and more production-viable here.
 
 | Type | Count | Source | Cadence | Live at inference? |
 |---|---|---|---|---|
-| `grid` | ~700 (v1) | **GFS GRIB2, NOAA AWS**, 22 vars incl. pressure levels | 6-hourly | **Yes** |
+| `grid` | 1,600 (v1) | **GFS GRIB2, NOAA AWS**, 22 vars incl. pressure levels | 6-hourly | **Yes** |
 | `station` | 16 (extensible) | METAR observations, 9 vars | hourly | **Yes** |
 | `farm` | arbitrary | prediction targets, any lat/lon | hourly | n/a |
 
@@ -127,12 +127,14 @@ making.
 
 ### 3.3 Domain, resolution and cadence
 
-**v1: 1.0° across 10 °S–30 °N, 85–125 °E ≈ 700 nodes.**
+**v1: 1.0° across 10 °S–30 °N, 85–125 °E = 1,600 nodes.**
 
-Rationale in §5.3. This is ~5× the current receptive field. A 0.5°-over-
-Thailand refinement (~1,990 nodes total) is prepared but **gated on
-validation evidence**, not adopted upfront — compute and data cost are no
-longer the constraint, effective sample size is.
+Roughly 10× the current receptive field, reaching ~1,700 km upstream — the
+advection distance at 48 h. Rationale in §5.3.
+
+A 0.5°-over-Thailand refinement (~2,100 nodes total) is prepared but gated on
+validation evidence. Note this is a *resolution* decision, not a *domain*
+decision: the two have different cost profiles (§5.3).
 
 **Cadence: grid 6-hourly, stations hourly.** GFS runs 4×/day, and both
 reference papers operate on 6-hourly timesteps, so 6-hourly grid state is
@@ -225,7 +227,7 @@ including f024/f048. Free S3 egress. After regional crop: **1.1 GB at 1.0°,
 
 Standard $29/mo (1M calls/mo), Professional $99/mo (5M). Free tier is 10k/day
 and **non-commercial only**, so any production use requires a paid plan.
-Backfill under fractional counting would be ~211k calls at 700 nodes.
+Backfill under fractional counting would be ~480k calls at 1,600 nodes.
 
 Cost is trivial, but GFS-direct is preferred for the leakage and variable-
 coverage reasons above. Open-Meteo remains a viable fallback for METAR-
@@ -360,13 +362,27 @@ fallback path, not an accident.
 in ~6–12 h and the 16 stations are spatially correlated, so **effective
 independent sample size is order 10³–10⁴, not 10⁵.**
 
-RunPod multi-GPU removes the compute constraint and GFS-direct removes the
-cost constraint, but neither creates independent samples. A 0.25° /
-1,990-node domain is therefore affordable but statistically risky.
+**Domain size is not the lever for this.** GNN parameters are shared across
+nodes: adding grid nodes increases compute and input information, but not
+parameter count. Overfitting risk lives in hidden width, processor depth and
+the head — not in how many grid points feed them. An earlier revision of this
+spec conflated the two and recommended shrinking the domain on statistical
+grounds; that reasoning was wrong.
 
-**v1 starts at 700 nodes and scales up only on validation evidence that the
-model is data-limited rather than capacity-limited.** Regularisation, the
-zero-initialised residual head, and modest hidden width do the rest.
+RunPod multi-GPU removes the compute constraint and GFS-direct removes the
+cost constraint, so **the domain is set by meteorology (§3.3), and capacity is
+controlled independently** via hidden width, depth, dropout, the
+zero-initialised residual head, and early stopping.
+
+What effective sample size *does* constrain: hidden width and processor depth
+should start modest (hidden ≤ 256, 8 rounds) and grow only on evidence of
+underfitting. It also means validation must be judged on the station k-fold
+(§6.1), where the ~10³ figure is the honest denominator for confidence
+intervals.
+
+Resolution — unlike domain — is a genuine trade: 0.25° over Thailand carries
+16× the grid nodes of 1.0° for the same area, and 18 GB vs 1.1 GB. Gated on
+validation evidence.
 
 ### 5.4 Why not Keisler-faithful autoregression
 
@@ -538,7 +554,7 @@ partly on fabricated data, and no more skilful.
 - Copernicus CDS ingestion / ERA5 pressure levels (§4.5).
 - GFS before 2021-01 (§4.5).
 - Ensemble / probabilistic GFS (GEFS members).
-- 0.25° domain refinement — prepared, gated on §5.3 evidence.
+- 0.25° resolution refinement over Thailand — prepared, gated on §5.3 evidence.
 - Re-tuning `pos_weight` before the residual head exists (§2.4).
 
 ---
