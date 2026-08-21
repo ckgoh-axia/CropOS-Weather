@@ -96,3 +96,40 @@ def test_per_station_report_has_all_stations():
     stations = ["VTBS", "VTBD", "VTCC"]
     report = per_station_report(probs, labels, station_names=stations, horizons_h=[12, 24, 36, 48])
     assert set(report.keys()) == set(stations)
+
+
+def test_bss_vs_reference_zero_when_identical():
+    from src.evaluation.metrics import brier_skill_score_vs_reference
+
+    probs, labels = _make_preds()
+    bss = brier_skill_score_vs_reference(probs, probs, labels)
+    assert bss.shape == (4,)
+    assert np.allclose(bss, 0.0, atol=1e-9)
+
+
+def test_bss_vs_reference_positive_when_model_better():
+    from src.evaluation.metrics import brier_skill_score_vs_reference
+
+    labels = np.ones((100, 2), dtype=np.float32)
+    good = np.full((100, 2), 0.9, dtype=np.float32)
+    poor = np.full((100, 2), 0.4, dtype=np.float32)
+    bss = brier_skill_score_vs_reference(good, poor, labels)
+    assert (bss > 0).all()
+
+
+def test_bss_vs_reference_negative_when_model_worse():
+    from src.evaluation.metrics import brier_skill_score_vs_reference
+
+    labels = np.ones((100, 2), dtype=np.float32)
+    good = np.full((100, 2), 0.9, dtype=np.float32)
+    poor = np.full((100, 2), 0.4, dtype=np.float32)
+    bss = brier_skill_score_vs_reference(poor, good, labels)
+    assert (bss < 0).all()
+
+
+def test_bss_vs_reference_handles_perfect_reference():
+    from src.evaluation.metrics import brier_skill_score_vs_reference
+
+    labels = np.ones((20, 1), dtype=np.float32)
+    bss = brier_skill_score_vs_reference(labels, labels, labels)
+    assert np.isfinite(bss).all()

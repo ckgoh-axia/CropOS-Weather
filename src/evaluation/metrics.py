@@ -50,6 +50,27 @@ def brier_skill_score(probs: np.ndarray, labels: np.ndarray) -> np.ndarray:
     return bss
 
 
+def brier_skill_score_vs_reference(
+    probs: np.ndarray, reference: np.ndarray, labels: np.ndarray
+) -> np.ndarray:
+    """Brier Skill Score against an arbitrary reference forecast, per horizon.
+
+    BSS = 1 - BS_model / BS_reference.
+
+    Unlike ``brier_skill_score``, which compares against climatology, this
+    compares against a competing forecast — for CropOS, the free public GFS or
+    GraphCast-GFS forecast. "Better than climatology" is a weak claim when a
+    farmer can already download a real forecast for nothing; this is the
+    number that supports the product claim (spec §10).
+
+    Returns 0.0 for any horizon where the reference is already perfect, since
+    no improvement is possible there.
+    """
+    bs_model = brier_score(probs, labels)
+    bs_ref = brier_score(reference, labels)
+    return np.where(bs_ref > 1e-9, 1.0 - bs_model / bs_ref, 0.0)
+
+
 def binary_confusion_stats(
     probs: np.ndarray,
     labels: np.ndarray,
