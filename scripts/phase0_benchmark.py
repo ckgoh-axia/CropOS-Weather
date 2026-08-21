@@ -10,11 +10,13 @@ rule in spec 4.3 is enforced for the benchmark exactly as it will be at
 inference. A benchmark that cheats would set the bar too high.
 
 Forecasts are checkpointed as one parquet shard per day under
-``<out>/shards/`` as soon as that day completes, so an interrupted multi-hour
-run resumes from the next unfetched day instead of restarting.
-``<out>/forecasts.parquet`` is always rebuilt from exactly the shards for the
-requested ``--start``/``--end``, so it can never silently reflect a different
-window than the one just requested.
+``<out>/shards/`` — written only once that day's fetches all succeed in
+full, so a day with any transient failure is retried on the next run rather
+than being cached as an incomplete success (see fix-round-2 NEW-2).
+``<out>/forecasts.parquet`` is always rebuilt from exactly the shards that
+exist for the requested ``--start``/``--end``, so it can never silently
+reflect a different window than the one just requested, and coverage below
+the gate's threshold is reported honestly rather than silently passing.
 
 Usage:
     PYTHONPATH=. python scripts/phase0_benchmark.py \\
@@ -48,6 +50,16 @@ HORIZONS_H = [24, 48]
 THRESHOLD_MM = 1.0
 ACCUM_WINDOW_H = 6
 
+# Forecast row schema, shared by fetch_forecasts (writing shards) and
+# _load_shards (reading/concatenating them + the empty-window fallback) so
+# an all-empty day or an all-missing window never loses its column schema
+# (fix-round-2 NEW-4 — a bare pd.DataFrame([]) has NO columns at all, which
+# crashed downstream `fc.model` access on a fully-empty result).
+FORECAST_COLS = [
+    "issuance", "valid_time", "horizon_h", "model", "run", "lead_h",
+    "station", "precip_mm",
+]
+
 # GraphCast-GFS archive begins here; the fine-tune window starts with it.
 FIT_START = pd.Timestamp("2024-02-05", tz="UTC")
 FIT_END = pd.Timestamp("2025-06-30", tz="UTC")
@@ -56,7 +68,9 @@ FIT_END = pd.Timestamp("2025-06-30", tz="UTC")
 # noise on OUT-OF-SAMPLE BSS (never in-sample — a 2-parameter logistic fit
 # and scored on the same rows essentially always beats the in-sample base
 # rate; see Task 4 fix-round-1 Critical 2) and must be fetched at >=90%
-# coverage (Important 3).
+# SCORED coverage (Important 3 / fix-round-2 NEW-1 — scored, not raw
+# per-model fetch coverage, or a coverage gap in one model can hide behind
+# the other model's untouched 100%).
 GATE_MIN_BSS_48H = 0.02
 GATE_MIN_COVERAGE = 0.90
 
@@ -86,33 +100,58 @@ def _write_shard(path: Path, df: pd.DataFrame) -> None:
     tmp.replace(path)
 
 
-def fetch_forecasts(start: pd.Timestamp, end: pd.Timestamp, shard_dir: Path) -> dict:
+def _stats_sidecar_path(shard_dir: Path, day: pd.Timestamp) -> Path:
+    return shard_dir / f"{day.date()}.stats.json"
+
+
+def _write_day_stats(shard_dir: Path, day: pd.Timestamp, day_stats: dict) -> None:
+    """Write a day's fetch-stats sidecar atomically (write-then-rename).
+
+    Written for every day fetch_forecasts actually processes, whether that
+    day ends up complete or not, so a resumed run's tally reflects the real
+    fetch history across invocations instead of resetting to 0 on every
+    call (fix-round-2 NEW-3). See _aggregate_day_stats.
+    """
+    p = _stats_sidecar_path(shard_dir, day)
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(day_stats))
+    tmp.replace(p)
+
+
+def fetch_forecasts(start: pd.Timestamp, end: pd.Timestamp, shard_dir: Path) -> None:
     """Fetch GFS and GraphCast-GFS accumulated precip for each day and horizon.
 
-    Writes one parquet shard per day to ``shard_dir`` as soon as that day
-    completes. A day whose shard already exists is skipped without any
-    network call, so re-running after an interruption resumes rather than
-    restarts (Important 2).
+    Writes one parquet shard per day to ``shard_dir`` — but ONLY if that day
+    is complete: every attempted (horizon, model) fetch for that day
+    succeeded with a full 16-station result and zero exceptions. A day with
+    any fetch exception is deliberately left without a shard, so a later run
+    retries it instead of permanently caching it with fewer rows than
+    expected (fix-round-2 NEW-2 — the previous version wrote the shard
+    unconditionally after the day's loop, so a transient S3 failure eroded
+    coverage silently and forever, since a later run would see the shard
+    "exists" and never retry that day).
 
-    Returns fetch diagnostics: attempted/exception counts per model, the
-    count of (day, horizon) pairs skipped by the leakage guard or the 6h
-    bucket-end check, and the number of days processed.
+    A per-day stats sidecar (``<date>.stats.json``) is written alongside
+    every day this function actually processes — complete or not — so the
+    fetch tally in the report survives a resumed run (see
+    _aggregate_day_stats, fix-round-2 NEW-3).
+
+    A day whose shard already exists (i.e. previously completed in full) is
+    skipped without any network call.
     """
     shard_dir.mkdir(parents=True, exist_ok=True)
-    stats = {
-        "days": 0,
-        "run_select_skips": 0,
-        "gfs": {"attempted": 0, "fetch_exceptions": 0},
-        "graphcast": {"attempted": 0, "fetch_exceptions": 0},
-    }
+    newly_complete = 0
+    newly_incomplete = 0
     for day in pd.date_range(start, end, freq="D", tz="UTC"):
-        stats["days"] += 1
         shard_path = shard_dir / f"{day.date()}.parquet"
         if shard_path.exists():
-            logger.info(f"{day.date()}: shard exists, skipping fetch")
+            logger.info(f"{day.date()}: shard exists (complete), skipping fetch")
             continue
 
         rows: list[dict] = []
+        day_attempted = {"gfs": 0, "graphcast": 0}
+        day_exceptions = {"gfs": 0, "graphcast": 0}
+        day_skips = 0
         issuance = day  # 00Z issuance
         for h in HORIZONS_H:
             valid = issuance + pd.Timedelta(hours=h)
@@ -120,26 +159,26 @@ def fetch_forecasts(start: pd.Timestamp, end: pd.Timestamp, shard_dir: Path) -> 
                 run, lead = select_run(issuance, valid)
             except ValueError as exc:
                 logger.warning(f"skip {issuance} h={h}: {exc}")
-                stats["run_select_skips"] += 1
+                day_skips += 1
                 continue
             if lead - bucket_start(lead) != ACCUM_WINDOW_H:
                 # select_run may return a lead that is not a 6h bucket end.
                 logger.debug(f"skip {issuance} h={h}: lead {lead} not a 6h bucket end")
-                stats["run_select_skips"] += 1
+                day_skips += 1
                 continue
             pattern = _apcp_pattern(lead)
             for model, bucket, keyfn in (
                 ("gfs", BUCKET_GFS, gfs_key),
                 ("graphcast", BUCKET_GRAPHCAST, graphcast_key),
             ):
-                stats[model]["attempted"] += 1
+                day_attempted[model] += 1
                 try:
                     vals = fetch_point_values(
                         bucket, keyfn(run, lead), pattern, STATION_COORDS
                     )
                 except Exception as exc:  # noqa: BLE001 — log, count, continue
                     logger.warning(f"{model} {run} f{lead:03d}: {exc}")
-                    stats[model]["fetch_exceptions"] += 1
+                    day_exceptions[model] += 1
                     continue
                 for station, mm in vals.items():
                     rows.append(
@@ -154,37 +193,92 @@ def fetch_forecasts(start: pd.Timestamp, end: pd.Timestamp, shard_dir: Path) -> 
                             "precip_mm": mm,
                         }
                     )
-        day_df = pd.DataFrame(rows)
-        _write_shard(shard_path, day_df)
-        logger.info(f"{day.date()}: {len(day_df):,} rows written to {shard_path.name}")
-    return stats
+
+        _write_day_stats(
+            shard_dir,
+            day,
+            {
+                "attempted": day_attempted,
+                "fetch_exceptions": day_exceptions,
+                "run_select_skips": day_skips,
+            },
+        )
+
+        expected_rows = sum(day_attempted.values()) * len(STATION_COORDS)
+        total_exceptions = sum(day_exceptions.values())
+        day_df = pd.DataFrame(rows, columns=FORECAST_COLS)
+        if total_exceptions == 0 and len(day_df) == expected_rows:
+            _write_shard(shard_path, day_df)
+            newly_complete += 1
+            logger.info(
+                f"{day.date()}: complete, {len(day_df):,} rows written to {shard_path.name}"
+            )
+        else:
+            newly_incomplete += 1
+            logger.warning(
+                f"{day.date()}: INCOMPLETE ({len(day_df)}/{expected_rows} rows, "
+                f"{total_exceptions} fetch exceptions) — shard NOT written, will retry"
+            )
+    logger.info(
+        f"fetch pass done: {newly_complete} day(s) newly completed, "
+        f"{newly_incomplete} day(s) still incomplete (will retry next run)"
+    )
+
+
+def _aggregate_day_stats(shard_dir: Path, start: pd.Timestamp, end: pd.Timestamp) -> dict:
+    """Aggregate per-day fetch-stats sidecars for [start, end].
+
+    Reading these from disk (rather than accumulating in memory inside a
+    single fetch_forecasts call) is what makes the tally survive a resumed
+    run: a day fetched in an earlier invocation still contributes its
+    attempted/exception counts here instead of resetting to 0 (fix-round-2
+    NEW-3). ``incomplete_days`` lists every requested day with no shard file
+    — i.e. not yet fetched in full (fix-round-2 NEW-2); a missing shard is
+    expected here, not a bug.
+    """
+    agg = {
+        "run_select_skips": 0,
+        "gfs": {"attempted": 0, "fetch_exceptions": 0},
+        "graphcast": {"attempted": 0, "fetch_exceptions": 0},
+        "incomplete_days": [],
+    }
+    for day in pd.date_range(start, end, freq="D", tz="UTC"):
+        sidecar = _stats_sidecar_path(shard_dir, day)
+        if sidecar.exists():
+            day_stats = json.loads(sidecar.read_text())
+            agg["run_select_skips"] += day_stats["run_select_skips"]
+            for model in ("gfs", "graphcast"):
+                agg[model]["attempted"] += day_stats["attempted"][model]
+                agg[model]["fetch_exceptions"] += day_stats["fetch_exceptions"][model]
+        shard = shard_dir / f"{day.date()}.parquet"
+        if not shard.exists():
+            agg["incomplete_days"].append(str(day.date()))
+    return agg
 
 
 def _load_shards(shard_dir: Path, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
-    """Concatenate the per-day shards covering [start, end].
+    """Concatenate the per-day shards covering [start, end] that exist.
 
-    forecasts.parquet is always rebuilt from these shards for exactly the
-    requested window, so a stale cache from a different --start/--end can
-    never be silently reused (Important 2). fetch_forecasts writes a shard
-    for every day it processes (even an all-failed day gets an empty
-    shard), so a missing shard here means fetch_forecasts did not run to
-    completion for this window — fail loudly rather than silently drop days.
+    A day's shard exists only if fetch_forecasts completed it in full
+    (fix-round-2 NEW-2): a day with any fetch exception is deliberately left
+    without a shard so a later run retries it. So a missing shard here is
+    expected, not an error — it means that day is not yet fully fetched
+    (pending retry, or a persistent upstream failure). This function must
+    not raise on it: raising would turn an ordinary transient S3 failure
+    into a crashed run instead of the honest reduced-coverage FAIL the gate
+    is designed to produce (see main()'s coverage/gate logic). A stale cache
+    from a DIFFERENT --start/--end is still impossible here regardless of
+    this relaxation: only shards for days inside the exact requested range
+    are ever read, so a directory holding other date ranges' shards cannot
+    leak into this result (Important 2's original concern).
     """
-    cols = [
-        "issuance", "valid_time", "horizon_h", "model", "run", "lead_h",
-        "station", "precip_mm",
-    ]
     frames = []
     for day in pd.date_range(start, end, freq="D", tz="UTC"):
         p = shard_dir / f"{day.date()}.parquet"
-        if not p.exists():
-            raise FileNotFoundError(
-                f"missing shard for {day.date()} in {shard_dir} — a previous "
-                "run may have been killed mid-day. Re-run to fetch it."
-            )
-        frames.append(pd.read_parquet(p))
+        if p.exists():
+            frames.append(pd.read_parquet(p))
     if not frames:
-        return pd.DataFrame(columns=cols)
+        return pd.DataFrame(columns=FORECAST_COLS)
     return pd.concat(frames, ignore_index=True)
 
 
@@ -406,6 +500,12 @@ def _score_cell(view: pd.DataFrame, label_col: str, cell_name: str) -> dict:
         "n_fit": int(len(fit_df)),
         "n_score": int(len(score_df)),
         "base_rate": float(sub[label_col].mean()),
+        # Base rate of the HELD-OUT half only. A degenerate score-half (e.g.
+        # single-class) makes brier_skill_score's bs_clim>1e-9 guard return
+        # a flat 0.0 that looks like an ordinary "no skill" result — this
+        # column is what lets a reader spot that degeneracy instead of
+        # mistaking it for a real measurement (fix-round-2 NEW-5).
+        "score_base_rate": float(np.mean(y_score)),
         "bss_in_sample": bss_in,
         "bss_out_of_sample": bss_out,
         "calibration_a": a_full,
@@ -423,7 +523,11 @@ def _build_matched(df: pd.DataFrame, h: int) -> pd.DataFrame:
     both models on identically the same rows, so a coverage gap in one model
     cannot inflate or deflate its BSS relative to the other (Task 4
     fix-round-1 Minors: "gate takes max() across models ... different row
-    sets").
+    sets"). This is also why the gate's coverage check must be based on
+    ``len(matched)`` / the scored cell's ``n``, not either model's own raw
+    fetch count (fix-round-2 NEW-1): a gap in one model shrinks this
+    intersection for BOTH models even though the unaffected model's own
+    fetch coverage still reads 100%.
     """
     cols = [
         "valid_time", "station", "issuance", "precip_mm",
@@ -494,6 +598,7 @@ def _score_pair(
         "n": n,
         "n_fit": int(len(fit_df)),
         "n_score": int(len(score_df)),
+        "score_base_rate": float(np.mean(y_score)),
         "bss_in_sample": _rel(fit_df, y_fit),
         "bss_out_of_sample": _rel(score_df, y_score),
     }
@@ -501,22 +606,89 @@ def _score_pair(
 
 def _emit_cell_row(model: str, h: int, cell: dict) -> str:
     if cell["status"] == "insufficient":
-        return f"| {model} | {h}h | {cell['n']} | — | — | — | insufficient (n<{MIN_CELL_N}) |"
+        return (
+            f"| {model} | {h}h | {cell['n']} | — | — | — | — | "
+            f"insufficient (n<{MIN_CELL_N}) |"
+        )
     if cell["status"] == "insufficient_split":
         return (
-            f"| {model} | {h}h | {cell['n']} | — | — | — | insufficient split "
+            f"| {model} | {h}h | {cell['n']} | — | — | — | — | insufficient split "
             f"(fit={cell['n_fit']}, score={cell['n_score']}) |"
         )
     if cell["status"] == "single_class":
         return (
-            f"| {model} | {h}h | {cell['n']} | {cell['base_rate']:.3f} | — | — | "
+            f"| {model} | {h}h | {cell['n']} | {cell['base_rate']:.3f} | — | — | — | "
             "single-class — not scorable |"
         )
+    # "ok" means scorable, NOT skilful — a negative out-of-sample BSS is a
+    # perfectly valid "ok" result that says the forecast has no measurable
+    # skill here. Show that explicitly so a skim of this column can't
+    # mistake a negative result for a pass (fix-round-2 presentation fix).
+    verdict = "skilful (BSS>0)" if cell["bss_out_of_sample"] > 0 else "not skilful (BSS<=0)"
     return (
         f"| {model} | {h}h | {cell['n']:,} (fit {cell['n_fit']:,}/"
         f"score {cell['n_score']:,}) | {cell['base_rate']:.3f} | "
-        f"{cell['bss_in_sample']:+.4f} | {cell['bss_out_of_sample']:+.4f} | ok |"
+        f"{cell['score_base_rate']:.3f} | "
+        f"{cell['bss_in_sample']:+.4f} | {cell['bss_out_of_sample']:+.4f} | {verdict} |"
     )
+
+
+def _write_empty_window_report(
+    out: Path, args: argparse.Namespace, n_days: int, fetch_stats: dict
+) -> None:
+    """Write a minimal report.md/gate.json and return cleanly when no
+    forecast rows exist at all for the requested window, instead of letting
+    `fc.model` (or anything downstream) raise on a columnless/empty frame
+    (fix-round-2 NEW-4).
+    """
+    incomplete = fetch_stats["incomplete_days"]
+    shown = incomplete[:20]
+    more = len(incomplete) - len(shown)
+    lines = [
+        "# Phase 0 — Forecast Benchmark",
+        "",
+        f"Window: {args.start} to {args.end}  ({n_days} days)",
+        "",
+        "**No forecast rows were fetched for this window** — every "
+        "requested day is incomplete (0 complete shards). Nothing to score.",
+        "",
+        f"Incomplete days ({len(incomplete)}): " + ", ".join(shown)
+        + (f", +{more} more" if more > 0 else ""),
+        (
+            f"- GFS fetch exceptions: {fetch_stats['gfs']['fetch_exceptions']:,} of "
+            f"{fetch_stats['gfs']['attempted']:,} attempted"
+        ),
+        (
+            "- GraphCast-GFS fetch exceptions: "
+            f"{fetch_stats['graphcast']['fetch_exceptions']:,} of "
+            f"{fetch_stats['graphcast']['attempted']:,} attempted"
+        ),
+        "",
+        "## Gate",
+        "",
+        "- Scored coverage at 48 h: 0.0%",
+        f"- Thresholds: out-of-sample BSS > {GATE_MIN_BSS_48H}, "
+        f"coverage >= {GATE_MIN_COVERAGE:.0%}",
+        "- **FAIL — revisit design**",
+    ]
+    (out / "report.md").write_text("\n".join(lines))
+    (out / "gate.json").write_text(
+        json.dumps(
+            {
+                "passed": False,
+                "best_model_48h": None,
+                "scored_coverage_48h_best_model": 0.0,
+                "fetch_coverage_48h_best_model": 0.0,
+                "fetch_stats": fetch_stats,
+                "results": {},
+            },
+            indent=2,
+            default=str,
+        )
+    )
+    logger.error("no complete forecast shards for the requested window — nothing to score")
+    logger.info(f"wrote {out/'report.md'} and {out/'gate.json'}")
+    print("\n".join(lines))
 
 
 def main() -> None:
@@ -550,17 +722,25 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
     shard_dir = out / "shards"
 
-    fetch_stats = fetch_forecasts(start_ts, end_ts, shard_dir)
+    fetch_forecasts(start_ts, end_ts, shard_dir)
+    fetch_stats = _aggregate_day_stats(shard_dir, start_ts, end_ts)
+    n_days = len(pd.date_range(start_ts, end_ts, freq="D", tz="UTC"))
+    expected_per_cell = n_days * len(STATION_COORDS)
+
     fc = _load_shards(shard_dir, start_ts, end_ts)
     fc.to_parquet(out / "forecasts.parquet", index=False)
     logger.info(f"forecast rows: {len(fc):,}")
+
+    if fc.empty or "model" not in fc.columns:
+        _write_empty_window_report(out, args, n_days, fetch_stats)
+        return
 
     lbl, label_diag = build_labels(Path(args.labels), Path(args.metar), fc["valid_time"])
     df = fc.merge(lbl, on=["valid_time", "station"], how="inner")
     matched_by_h = {h: _build_matched(df, h) for h in HORIZONS_H}
 
-    n_days = fetch_stats["days"]
-    expected_per_cell = n_days * len(STATION_COORDS)
+    # Raw per-model fetch coverage — diagnostic only. This is NOT what the
+    # gate uses (fix-round-2 NEW-1): see the "Scored coverage" section below.
     coverage: dict[tuple[str, int], float] = {}
     for model in ("gfs", "graphcast"):
         for h in HORIZONS_H:
@@ -587,9 +767,17 @@ def main() -> None:
     )
     lines.append("")
 
-    lines.append("## Fetch coverage")
+    lines.append("## Fetch coverage (raw, per model — diagnostic only)")
     lines.append("")
-    lines.append("| model | horizon | fetched | expected | coverage |")
+    lines.append(
+        "This is each model's own fetch success rate. It is NOT what the "
+        "gate checks — see 'Scored coverage' below, which reflects the "
+        "gfs∩graphcast matched row set the BSS tables actually score "
+        "against. A model can read 100% here while its scored coverage is "
+        "much lower, if the OTHER model has gaps (fix-round-2 NEW-1)."
+    )
+    lines.append("")
+    lines.append("| model | horizon | fetched | expected | fetch coverage |")
     lines.append("|---|---|---|---|---|")
     for model in ("gfs", "graphcast"):
         for h in HORIZONS_H:
@@ -598,6 +786,17 @@ def main() -> None:
             lines.append(
                 f"| {model} | {h}h | {fetched:,} | {expected_per_cell:,} | {cov:.1%} |"
             )
+    incomplete = fetch_stats["incomplete_days"]
+    if incomplete:
+        shown = incomplete[:15]
+        more = len(incomplete) - len(shown)
+        lines.append(
+            f"- Incomplete days (no shard written yet, will retry next run): "
+            f"{len(incomplete):,} — " + ", ".join(shown)
+            + (f", +{more} more" if more > 0 else "")
+        )
+    else:
+        lines.append("- Incomplete days: 0")
     lines.append(
         f"- Leakage/bucket-end skips (both models, both horizons): "
         f"{fetch_stats['run_select_skips']:,}"
@@ -623,13 +822,16 @@ def main() -> None:
         "rows. `calibration_a`/`calibration_b` in gate.json are refit on "
         "the full window once scoring is complete, for seeding the "
         "residual head's prior; they are NOT what produced the BSS numbers "
-        "below."
+        "below. `score-half base rate` is the held-out half's own base "
+        "rate — if it's 0.000 or 1.000 the cell is degenerate even though "
+        "the verdict column still reads normally (see gate.json)."
     )
     lines.append("")
     lines.append(
-        "| model | horizon | n | base rate | BSS in-sample | BSS out-of-sample | status |"
+        "| model | horizon | n | base rate | score-half base rate | "
+        "BSS in-sample | BSS out-of-sample | verdict |"
     )
-    lines.append("|---|---|---|---|---|---|---|")
+    lines.append("|---|---|---|---|---|---|---|---|")
     for model in ("gfs", "graphcast"):
         for h in HORIZONS_H:
             view = _model_view(matched_by_h[h], "g" if model == "gfs" else "c")
@@ -652,9 +854,10 @@ def main() -> None:
     )
     lines.append("")
     lines.append(
-        "| model | horizon | n | base rate | BSS in-sample | BSS out-of-sample | status |"
+        "| model | horizon | n | base rate | score-half base rate | "
+        "BSS in-sample | BSS out-of-sample | verdict |"
     )
-    lines.append("|---|---|---|---|---|---|---|")
+    lines.append("|---|---|---|---|---|---|---|---|")
     for model in ("gfs", "graphcast"):
         for h in HORIZONS_H:
             view = _model_view(matched_by_h[h], "g" if model == "gfs" else "c")
@@ -671,25 +874,69 @@ def main() -> None:
         "against `era5_rain`, same fit/score split as above)."
     )
     lines.append("")
-    lines.append("| horizon | n (fit/score) | BSS in-sample | BSS out-of-sample | status |")
-    lines.append("|---|---|---|---|---|")
+    lines.append(
+        "| horizon | n (fit/score) | score-half base rate | BSS in-sample | "
+        "BSS out-of-sample | verdict |"
+    )
+    lines.append("|---|---|---|---|---|---|")
     for h in HORIZONS_H:
         cell = _score_pair(matched_by_h[h], "era5_rain", None, f"graphcast_vs_gfs_{h}h")
         results[f"graphcast_vs_gfs_{h}h"] = cell
         if cell["status"] == "ok":
+            verdict = (
+                "graphcast better (BSS>0)"
+                if cell["bss_out_of_sample"] > 0
+                else "graphcast not better (BSS<=0)"
+            )
             lines.append(
                 f"| {h}h | {cell['n_fit']:,}/{cell['n_score']:,} | "
-                f"{cell['bss_in_sample']:+.4f} | {cell['bss_out_of_sample']:+.4f} | ok |"
+                f"{cell['score_base_rate']:.3f} | {cell['bss_in_sample']:+.4f} | "
+                f"{cell['bss_out_of_sample']:+.4f} | {verdict} |"
             )
         else:
-            lines.append(f"| {h}h | {cell.get('n', 0)} | — | — | {cell['status']} |")
+            lines.append(f"| {h}h | {cell.get('n', 0)} | — | — | — | {cell['status']} |")
+    lines.append("")
+
+    # Scored coverage — this is what the gate uses (fix-round-2 NEW-1). The
+    # raw per-model "Fetch coverage" table above can hide a coverage gap: if
+    # graphcast fails on 40% of days while gfs fetches cleanly throughout,
+    # gfs's own raw fetch coverage still reads 100% even though the
+    # gfs∩graphcast matched set — what era5_rain is actually scored against
+    # — has shrunk by the same 40%. Gate on THIS number instead.
+    lines.append("## Scored coverage (this is what the gate uses)")
+    lines.append("")
+    lines.append(
+        "Computed from the SAME gfs∩graphcast matched row set the BSS "
+        "tables above score against, not from either model's own raw fetch "
+        "count. A coverage gap in one model reduces both models' scored "
+        "coverage here, even when the unaffected model's raw fetch "
+        "coverage above still reads 100%."
+    )
+    lines.append("")
+    lines.append("| horizon | matched (gfs∩graphcast) | expected | matched coverage |")
+    lines.append("|---|---|---|---|")
+    for h in HORIZONS_H:
+        matched_n = len(matched_by_h[h])
+        matched_cov = matched_n / expected_per_cell if expected_per_cell else 0.0
+        lines.append(f"| {h}h | {matched_n:,} | {expected_per_cell:,} | {matched_cov:.1%} |")
+    lines.append("")
+    lines.append("| model | horizon | scored n (era5_rain) | expected | scored coverage |")
+    lines.append("|---|---|---|---|---|")
+    scored_coverage: dict[tuple[str, int], float] = {}
+    for model in ("gfs", "graphcast"):
+        for h in HORIZONS_H:
+            cell_n = results.get(f"{model}_{h}h_era5_rain", {}).get("n", 0)
+            cov = cell_n / expected_per_cell if expected_per_cell else 0.0
+            scored_coverage[(model, h)] = cov
+            lines.append(f"| {model} | {h}h | {cell_n:,} | {expected_per_cell:,} | {cov:.1%} |")
     lines.append("")
 
     # Gate — keys off era5_rain OUT-OF-SAMPLE BSS only, at 48h, from the SAME
     # matched (gfs ∩ graphcast) row set the head-to-head table uses, so a
     # coverage gap in one model cannot inflate its BSS relative to the other.
-    # Also requires >=90% fetch coverage at 48h for the winning model.
-    # metar_rain is never a gate input.
+    # Also requires >=90% SCORED coverage at 48h for the winning model — not
+    # raw fetch coverage (fix-round-2 NEW-1). metar_rain is never a gate
+    # input.
     gfs_48 = results.get("gfs_48h_era5_rain", {"status": "insufficient", "n": 0})
     gc_48 = results.get("graphcast_48h_era5_rain", {"status": "insufficient", "n": 0})
     scorable = [
@@ -703,6 +950,7 @@ def main() -> None:
     best_oos: float | None = None
     best_in: float | None = None
     cov = 0.0
+    raw_cov = 0.0
     if not scorable:
         lines.append("- No model was scorable at 48 h against `era5_rain` (see table above).")
         passed = False
@@ -710,25 +958,30 @@ def main() -> None:
         best_model, best_cell = max(scorable, key=lambda t: t[1]["bss_out_of_sample"])
         best_oos = best_cell["bss_out_of_sample"]
         best_in = best_cell["bss_in_sample"]
-        cov = coverage.get((best_model, 48), 0.0)
+        cov = scored_coverage.get((best_model, 48), 0.0)
+        raw_cov = coverage.get((best_model, 48), 0.0)
         lines.append(
             f"- Best model at 48 h (by out-of-sample BSS vs climatology): **{best_model}**"
         )
         lines.append(
             f"- Out-of-sample BSS at 48 h: **{best_oos:+.4f}** (in-sample: {best_in:+.4f})"
         )
-        lines.append(f"- Fetch coverage at 48 h for {best_model}: {cov:.1%}")
+        lines.append(
+            f"- Scored coverage at 48 h for {best_model}: **{cov:.1%}** "
+            f"(raw fetch coverage: {raw_cov:.1%})"
+        )
         passed = best_oos > GATE_MIN_BSS_48H and cov >= GATE_MIN_COVERAGE
     lines.append(
         f"- Thresholds: out-of-sample BSS > {GATE_MIN_BSS_48H}, "
-        f"coverage >= {GATE_MIN_COVERAGE:.0%}"
+        f"scored coverage >= {GATE_MIN_COVERAGE:.0%}"
     )
     lines.append(f"- **{'PASS — proceed' if passed else 'FAIL — revisit design'}**")
     if not passed:
         lines.append("")
         lines.append(
-            "The prior does not clear both the skill and coverage bars at "
-            "48 h. Do NOT commission the grid download. Report and revisit."
+            "The prior does not clear both the skill and scored-coverage "
+            "bars at 48 h. Do NOT commission the grid download. Report and "
+            "revisit."
         )
 
     (out / "report.md").write_text("\n".join(lines))
@@ -739,9 +992,11 @@ def main() -> None:
                 "best_model_48h": best_model,
                 "best_bss_48h_out_of_sample": best_oos,
                 "best_bss_48h_in_sample": best_in,
-                "coverage_48h_best_model": cov,
+                "scored_coverage_48h_best_model": cov,
+                "fetch_coverage_48h_best_model": raw_cov,
                 "fetch_stats": fetch_stats,
-                "coverage": {f"{m}_{h}h": c for (m, h), c in coverage.items()},
+                "fetch_coverage": {f"{m}_{h}h": c for (m, h), c in coverage.items()},
+                "scored_coverage": {f"{m}_{h}h": c for (m, h), c in scored_coverage.items()},
                 "label_diagnostics": label_diag,
                 "results": results,
             },
